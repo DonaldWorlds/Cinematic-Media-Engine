@@ -68,3 +68,12 @@ src/output/
 *.mxf
 yolov8n.pt
 .mypy_cache/
+src/input/
+src/output/
+.venv/
+*.MP4
+*.mp4
+*.mov
+*.mxf
+yolov8n.pt
+.mypy_cache/
