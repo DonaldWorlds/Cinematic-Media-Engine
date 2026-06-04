@@ -1,0 +1,51 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=5000']
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.2
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.1
+    hooks:
+      - id: mypy
+        # Isolated env must mirror the project's type-relevant deps, or mypy
+        # sees them as Any (+ --ignore-missing-imports) and emits false
+        # positives like "untyped decorator" on Typer commands. Loosened
+        # pins avoid drift from pyproject/uv.lock.
+        additional_dependencies:
+          - "pydantic>=2.0,<3.0"
+          - "pydantic-settings>=2.0,<3.0"
+          - typer
+          - rich
+          - "numpy>=1.26"   # Phase 2 analysis modules annotate np.ndarray; without
+                            # real numpy types the hook flags false no-untyped-call
+          - types-pyyaml
+          - types-requests
+        args: [--strict, --ignore-missing-imports]
+        exclude: ^(tests/|workspace/|src/output/|src/branding/)
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: uv run pytest tests/ -x --tb=short
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

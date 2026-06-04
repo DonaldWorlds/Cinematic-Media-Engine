@@ -1,0 +1,191 @@
+[project]
+name = "cinematic-media-engine"
+version = "0.1.0"
+description = "Multi-style media intelligence system — three content modes from one engine"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [
+    { name = "kkthedon" }
+]
+
+dependencies = [
+    # Transcription — WhisperX = faster-whisper (CTranslate2) backbone +
+    # wav2vec2 forced alignment for <100ms word timestamps. NOT openai-whisper.
+    # Brings transformers + (transitively) pyannote; we do NOT use diarization,
+    # so no HF token / gated models are needed.
+    # Compatible-release ranges below; exact resolved versions live in uv.lock.
+    "whisperx>=3.0",
+    "faster-whisper>=1.0,<2.0",
+
+    # Core video/audio
+    "librosa>=0.10,<0.12",
+    "opencv-python>=4.10,<5.0",
+    "scenedetect>=0.6,<0.7",
+
+    # Subject detection (Phase 4.5) — YOLO person detection for auto-reframe.
+    # Reuses the existing torch stack (must NOT bump torch <2.6); weights auto-download.
+    "ultralytics>=8.0,<9.0",
+
+    # Visual aesthetic
+    "open-clip-torch>=2.24,<3.0",
+    "torch>=2.2,<2.6",
+    "torchaudio>=2.2,<2.6",       # wav2vec2 alignment for WhisperX (MPS on M1)
+    "torchvision>=0.17,<0.21",    # aligned to torch <2.6
+    "Pillow>=10.0,<12.0",
+
+    # APIs
+    "twelvelabs>=0.2",            # let uv pick a recent build compatible with pydantic 2.x
+    "requests>=2.32,<3.0",        # Descript REST handoff (Phase 9); types-requests already in dev deps
+
+    # CLI and config
+    "typer>=0.12,<1.0",
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "python-dotenv>=1.0,<2.0",
+
+    # UX
+    "rich>=13.0,<15.0",
+
+    # Numerical
+    "numpy>=1.26",               # no upper cap — numpy 2.x is widely supported in 2026
+    "scipy>=1.13",
+]
+
+[project.scripts]
+cme = "src.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-cov>=5.0,<7.0",
+    "mypy>=1.11,<2.0",
+    "ruff>=0.6,<1.0",
+    "pre-commit>=3.8,<5.0",
+    "types-pyyaml",
+    "types-requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Our import package is literally `src` (SPEC §1 layout), so map the src/
+# directory to the `src` package. This keeps `from src...` working in both
+# tests and the installed `cme` console script (entry: src.cli:app).
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".venv",
+    "workspace",
+    "src/output",
+    "src/branding",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function call in default argument (common with Typer)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+exclude = [
+    "workspace/",
+    "tests/fixtures/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "librosa.*",
+    "cv2.*",
+    "open_clip.*",
+    "twelvelabs.*",
+    "scenedetect.*",
+    "faster_whisper.*",
+    "whisperx.*",
+    "torchaudio.*",
+]
+ignore_missing_imports = true
+
+# ultralytics ships partial types but doesn't re-export YOLO; "skip" treats it as
+# untyped so the import is consistent whether or not it's installed (the pre-commit
+# mypy hook runs in an isolated env WITHOUT ultralytics — see KNOWLEDGE.md).
+[[tool.mypy.overrides]]
+module = ["ultralytics.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=src",
+    "--cov-report=term-missing",
+]
+filterwarnings = [
+    # audioread (a librosa load backend) imports stdlib aifc/sunau/audioop,
+    # which are deprecated on Python 3.11. External to our code.
+    "ignore:'aifc' is deprecated:DeprecationWarning",
+    "ignore:'sunau' is deprecated:DeprecationWarning",
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "gpu: marks tests that require GPU",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "workspace/*",
+    "src/output/*",
+    "src/branding/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

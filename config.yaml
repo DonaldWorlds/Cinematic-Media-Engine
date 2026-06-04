@@ -1,0 +1,255 @@
+# Cinematic Media Engine — Root Configuration
+# Global settings that apply across all content modes.
+# Mode-specific overrides live in content_modes/*.yaml
+
+# ============================================================
+# DEFAULTS
+# ============================================================
+defaults:
+  mode: standard_longform               # Default mode when --mode not specified
+  workspace_root: ./workspace           # Where intermediate artifacts live
+  retention_days: 7                     # Auto-clean workspaces older than this
+
+# ============================================================
+# API KEYS (loaded from .env, never hardcoded)
+# ============================================================
+api:
+  twelvelabs:
+    api_key_env: TWELVELABS_API_KEY
+    index_id_env: TWELVELABS_INDEX_ID
+    timeout_seconds: 1800               # 30 min cap on indexing wait
+    required: false                     # Engine runs without TwelveLabs
+
+# ============================================================
+# TRANSCRIPTION (WhisperX = faster-whisper backbone + wav2vec2 alignment)
+# ============================================================
+# Mode-conditional: shortform always transcribes; cinematic_longform and
+# standard_longform are OFF by default and opt in via --transcribe.
+# See content_modes/*.yaml `transcription.enabled`.
+transcription:
+  backend: whisperx                     # faster-whisper (CTranslate2) + wav2vec2 forced alignment. NOT openai-whisper.
+  model_size: small                     # precision comes from alignment, not model size
+  device: cpu                           # Whisper step is CPU-only on M1 (CTranslate2 has no Metal backend)
+  compute_type: int8                    # fast CPU path on Apple Silicon
+  language: en                          # locked — prevents foreign-script auto-detect drift
+  word_timestamps: true
+  beam_size: 5
+  condition_on_previous_text: false     # stops a single error cascading across the clip
+  vad_filter: true                      # Voice activity detection on — kills music/silence hallucinations
+  vad_min_silence_ms: 500
+  alignment:
+    enabled: true                       # wav2vec2 forced alignment -> <100ms word timestamps
+    device: auto                        # MPS on M1 (torch backend), falls back to cpu
+  diarization:
+    enabled: false                      # single creator — pyannote skipped, no HF token needed
+  audio_preprocess:
+    loudnorm: true                      # ffmpeg loudnorm pre-pass before transcription
+    sample_rate: 16000                  # Whisper-native rate
+    mono: true
+
+# ============================================================
+# AUDIO ANALYSIS (librosa)
+# ============================================================
+audio:
+  sample_rate: 16000                    # Whisper-compatible
+  energy_window_sec: 1.0
+  peak_threshold_std: 1.5               # Peaks above 1.5 std above rolling mean
+  min_peak_gap_sec: 3.0                 # Merge peaks within 3 sec
+
+# ============================================================
+# VISUAL ANALYSIS
+# ============================================================
+opencv:
+  scene_detect_threshold: 27.0          # PySceneDetect ContentDetector threshold
+  motion_sample_rate_hz: 2.0            # Sample frames for motion 2x per second
+  enabled: true
+
+openclip:
+  model_name: ViT-B-32                  # ViT-B-32, ViT-L-14
+  pretrained: openai
+  device: auto                          # auto, cpu, mps
+  sample_rate_hz: 0.5                   # Sample 1 frame every 2 sec
+  batch_size: 8
+  enabled: true
+
+aesthetics:
+  enabled: true
+  sample_rate_hz: 1.0
+  metrics:
+    - lighting_quality
+    - composition_score
+    - color_harmony
+    - sharpness
+
+# Subject detection (Phase 4.5) — YOLO person detection -> analysis/subjects.json,
+# the content profile (count/spread) that drives auto-reframe (Layer 2).
+subjects:
+  enabled: true
+  model: yolov8n.pt                     # ultralytics model; weights auto-download (~6MB)
+  device: auto                          # auto -> mps on M1, cpu fallback
+  sample_rate_hz: 1.0                   # detect on 1 frame/sec
+  confidence: 0.35                      # min detection confidence (person class)
+
+# Auto-reframe decision (Phase 4.5 Layer 2) — reframe_method: auto reads subjects.json
+# per clip (median count + max spread over the window) and picks method + foreground_scale.
+reframe_decision:
+  solo_track_max_width: 0.5             # solo box wider than this (frac of frame) -> blur_pad, not track
+  bucket_2_fs: 1.2                      # exactly 2 people (was 1.3; 1.3 trimmed edges on real footage)
+  bucket_3_5_fs: 1.0                    # 3..small_group_max people (was 1.1; 1.0 = known-good, no edge crop)
+  small_group_max: 5
+  bucket_6_plus_fs: 1.0                 # >small_group_max, 0 people, or solo-too-wide -> keep everyone
+
+# Zoom-crop reframe (Phase 4.5 polish) — the parallel dual-output framing: full-bleed
+# punched-in vertical, no blur bars. Not a decision-engine bucket; forced for the
+# src/output/shorts/zoom_crop/ render when dual_output is on.
+zoom_crop_decision:
+  foreground_scale: 1.3                 # cover-scale punch-in (1.0 == center_crop; >1.0 zooms in, crops edges)
+
+# ============================================================
+# HOOK DETECTION (transcript-based)
+# ============================================================
+hooks:
+  enabled: true
+  hook_phrases:
+    # Generic viral hooks — tune per content type
+    - "yo"
+    - "wait"
+    - "no way"
+    - "bro"
+    - "what the"
+    - "hold on"
+    - "look at this"
+    - "let's go"
+    - "oh my"
+    - "actually"
+    - "real quick"
+    - "listen"
+    - "check this"
+  hook_window_sec: 3.0                  # Hook must appear in first 3 sec of segment
+
+# ============================================================
+# SCORING
+# ============================================================
+scoring:
+  composite_method: weighted_sum        # weighted_sum or weighted_max
+  normalize_range: [0.0, 1.0]
+  cluster_min_gap_sec: 15.0             # Default — modes can override
+  default_threshold: 0.4                # Drop moments scoring below this
+  window_aggregation: percentile        # mean | percentile (Phase 3.5: percentile spreads scores off the mean-aggregation ceiling)
+  window_percentile: 90                 # used when window_aggregation == percentile; modes can override
+
+# ============================================================
+# OUTPUT FORMATS (base resolutions, modes can override)
+# ============================================================
+output:
+  base_dir: ./src/output
+  formats:
+    shorts:
+      width: 1080
+      height: 1920
+      fps: 30
+      codec: h264
+    reels:
+      width: 1080
+      height: 1920
+      fps: 30
+      codec: h264
+    standard:
+      width: 1920
+      height: 1080
+      fps: 30
+      codec: h264
+    cinematic:
+      width: 3840
+      height: 2160
+      fps: 24
+      codec: h265
+    trailers:
+      width: 1920
+      height: 1080
+      fps: 30
+      codec: h264
+
+# ============================================================
+# FFMPEG
+# ============================================================
+ffmpeg:
+  binary_path: ffmpeg                   # Use system ffmpeg, full path if needed
+  ffprobe_path: ffprobe
+  hardware_acceleration: videotoolbox   # videotoolbox on M1, nvenc on NVIDIA, none for CPU
+  preset: medium                        # ultrafast, fast, medium, slow
+  threads: 0                            # 0 = auto-detect
+
+# ============================================================
+# RENDERING DEFAULTS (modes override)
+# ============================================================
+render:
+  subtitle_default_format: srt          # srt, vtt, ass
+  transition_default: hard_cut
+  branding_default_intensity: subtle
+
+# ============================================================
+# THUMBNAILS
+# ============================================================
+thumbnails:
+  enabled: true
+  count: 5
+  selection_method: high_expression     # high_expression, scene_change, manual_timestamps
+  output_format: png
+  resolution:
+    width: 1920
+    height: 1080
+
+# ============================================================
+# WORKSPACE MANAGEMENT
+# ============================================================
+workspace:
+  root: ./workspace
+  retention_days: 7
+  cleanup_on_start: false               # Set true to auto-clean old workspaces on each run
+  preserve_on_error: true               # Keep workspace if pipeline fails (for debugging)
+
+# ============================================================
+# LOGGING
+# ============================================================
+logging:
+  level: INFO                           # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true
+  log_file_path: ./workspace/engine.log
+  rich_console: true                    # Pretty terminal output
+
+# ============================================================
+# PERFORMANCE
+# ============================================================
+performance:
+  parallel_analysis: true               # Run analysis modules in parallel
+  # Phase 6 (CP1.5): threads-only scheduler with three concurrency lanes. Threads
+  # (not processes) because cv2/numpy/torch/ffmpeg release the GIL during native
+  # compute, and one process loads the cv2/av libavdevice dylibs once (no spawn clash,
+  # no per-worker memory blow-up on 8GB). See src/utils/parallel.py + KNOWLEDGE.md.
+  max_workers: 4                        # LIGHT lane: librosa / opencv / aesthetics / hooks
+  max_heavy_workers: 1                  # HEAVY lane: whisper / subjects — 1 GB-class model at a time (8GB)
+  max_render_workers: 2                 # RENDER lane: per-clip ffmpeg — videotoolbox session-safe
+  twelvelabs_async: true                # Upload starts before local analysis
+
+# ============================================================
+# CONTENT MODE PATHS
+# ============================================================
+content_modes:
+  config_dir: ./content_modes
+  available:
+    - standard_longform
+    - cinematic_longform
+    - shortform
+
+# ============================================================
+# BRANDING ASSETS
+# ============================================================
+branding:
+  assets_dir: ./src/branding
+  luts_dir: ./src/branding/luts
+  fonts_dir: ./src/branding/fonts
+  overlays_dir: ./src/branding/overlays
+  logos_dir: ./src/branding/logos
+  presets_dir: ./src/branding/presets
+  lower_thirds_dir: ./src/branding/lower_thirds

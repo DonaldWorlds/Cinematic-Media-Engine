@@ -1,0 +1,153 @@
+# Shortform Clip Mode Configuration
+# Purpose: High-retention short-form social media content (TikTok, Reels, Shorts)
+# Goal: Immediate attention capture, retention optimization, rapid pacing, viral potential
+
+mode_name: shortform
+
+# Transcription — ALWAYS on for shortform: burned-in captions require
+# word-level timing, and viral-hook scoring is transcript-based.
+transcription:
+  enabled: true
+  alignment_required: true      # wav2vec2 alignment needed for caption sync
+
+# Scoring weights — which signals matter most for picking moments to keep
+# Must sum to 1.0
+scoring_weights:
+  speech_intensity: 0.25        # Loud, energetic, animated speech
+  audio_peaks: 0.20             # Reaction peaks, laughter, exclamations
+  viral_hooks: 0.20             # Quotable hook phrases at segment start
+  emotional_reactions: 0.15     # Visible expression spikes
+  quotable_dialogue: 0.10       # Memorable lines and bits
+  fast_motion: 0.10             # Action moments, sudden movement
+
+# Pacing rules — how clips are constructed
+pacing:
+  min_segment_sec: 60        # Minimum clip length
+  max_segment_sec: 60           # Max for TikTok/Reels/Shorts
+  preferred_duration_sec: 60    # Sweet spot for retention
+  aggressive_cuts: true         # Cut dead air ruthlessly
+  hook_first_seconds: 3         # First 3 seconds must contain a hook
+  dead_air_threshold_sec: 1.5   # Cut any gap over 1.5 sec
+
+# Rendering — how clips look
+rendering:
+  transitions: rapid            # Quick cuts, no fancy transitions
+  transition_duration_sec: 0.15
+  effects_intensity: high       # Zoom effects, speed ramps allowed
+  zoom_effects: true            # Punch-in zooms on key moments
+  speed_ramps: true             # Slow-mo or speed up where it adds impact
+  subtitles: burned_in          # Captions hard-coded into video
+  subtitle_format: ass
+  caption_style: kkthedon_bold  # Reference to caption style preset
+  branding_intensity: prominent # Visible watermark, end-card branding
+  color_grade: light            # Subtle grade for consistency, not heavy LUT
+  aspect_ratio: 9:16            # Vertical for all major platforms
+  # reframe_method (Phase 4.5 Layer 2): auto is the default — the decision engine reads
+  # subjects.json per moment and picks per clip. Manual overrides stay selectable:
+  #   auto        (default) — per-moment: solo->track full-bleed, multi/wide->blur_pad (bars)
+  #   blur_pad              — force: wide/busy/multi-subject; preserves full frame, foreground_scale tunes bar size
+  #   center_crop           — force: only when subject reliably centered (full-bleed, LOSSY on edges)
+  #   track                 — force: solo full-body content; full-bleed, subject centered, NO bars
+  reframe_method: auto
+  foreground_scale: 1.2         # blur_pad fallback only: 1.0=full fit (big bars); >1.0 enlarges sharp band; capped 3.16
+  # dual_output: render EVERY moment twice for side-by-side comparison —
+  #   src/output/shorts/auto/      = the auto-reframe decision (blur_pad/track per moment)
+  #   src/output/shorts/zoom_crop/ = forced zoom_crop (full-bleed punch-in, no bars)
+  # Same captions/audio/timing/filenames; zoom_crop punch-in = zoom_crop_decision.foreground_scale.
+  dual_output: true
+  resolution:
+    width: 1080
+    height: 1920
+  fps: 30
+  video_codec: h264
+  audio_codec: aac
+  bitrate_target: 6M
+
+# Output configuration
+output:
+  base_dir: src/output/shorts
+  filename_pattern: "{date}_{source_name}_clip_{rank:02d}.mp4"
+  generate_thumbnails: false    # Platforms auto-pull thumbnails for shortform
+
+# Clip density — how aggressive the extraction is
+clip_density: high              # Extract many clips per source
+target_clips_per_session: 20    # Aim for 20 clips per source video
+
+# Composite score threshold — only export clips above this
+score_threshold: 0.55
+
+# Fallback: if NO window clears score_threshold, still return the top N ranked
+# windows (flagged below_threshold_best_candidates) so every run yields output.
+# The threshold is never lowered to force results — see KNOWLEDGE.md.
+top_n_fallback: 5
+
+# Window aggregation (Phase 3.5): percentile captures a window's near-peak so
+# spikes survive instead of being averaged away (mean ceilinged scores at ~0.36).
+window_aggregation: percentile  # mean | percentile
+window_percentile: 90           # 90th percentile within the 60s window
+
+# Diversity enforcement
+diversity:
+  min_gap_sec: 30               # Clips must be at least 30 sec apart in source
+  max_clips_per_minute: 2       # No more than 2 clips from any 1-min window
+
+# Output targets — informational
+output_targets:
+  - tiktok
+  - instagram_reels
+  - youtube_shorts
+  - snapchat_spotlight
+
+# TwelveLabs queries for this mode
+twelvelabs_queries:
+  - "high energy reaction or hype moment"
+  - "funny or laughing moment"
+  - "quotable or memorable line"
+  - "shocked or surprised reaction"
+  - "viral hook phrase or attention grab"
+  - "intense gameplay or skilled play"
+
+# Caption styling
+captions:
+  enabled: true
+  font: branding/fonts/caption_bold.ttf
+  font_size: 64
+  font_color: "FFFFFF"
+  outline_color: "000000"
+  outline_width: 3
+  position: center_middle       # center_middle, lower_third, upper_third
+  background: none              # none, semi_transparent, solid
+  animation: word_by_word       # word_by_word, line_by_line, fade_in
+  max_words_per_line: 4
+
+# Composition zones (1080x1920). v1 = full-bleed video + captions placed in the
+# caption_zone (the real fix for dead-centre captions). Face-dependent fields are
+# stored for schema-completeness but INERT until Phase 5 face detection (see KNOWLEDGE.md).
+composition:
+  # Vertical zones as fractions of frame height (0=top, 1=bottom). Reference / future use.
+  hook_zone: [0.00, 0.20]        # top 20% (y 0-384) — reserved for hook-text overlay (stubbed)
+  identity_zone: [0.20, 0.75]    # 20-75% (y 384-1440) — subject / focal point
+  caption_zone: [0.75, 0.92]     # 75-92% (y 1440-1766) — captions live here
+  dead_zone: [0.92, 1.00]        # bottom 8% (y 1766-1920) — nothing
+
+  # Caption placement — ACTIVE in v1 (consumed by subtitles.py via run_render)
+  caption_y_position: 0.80       # anchor at 80% height (y~1536) — above the bottom UI
+  caption_safe_width: 900        # max caption text width in px (centred in 1080 -> 90px L/R margins)
+  caption_top_safe_px: 108       # keep captions clear of the top 108px (guard for tall wraps)
+
+  # Face-aware framing — INERT until Phase 5 face detection (stored, NOT applied in v1)
+  crop_focal_y: 0.30             # target eyeline at 30% from top
+  face_fill_target: [0.40, 0.60] # face = 40-60% of frame height
+
+# Branding elements
+branding:
+  watermark: branding/overlays/kkthedon_watermark_prominent.png
+  watermark_position: top_left
+  watermark_opacity: 0.8
+  end_card: branding/presets/shortform_endcard.json
+  end_card_duration_sec: 1.5
+  hook_intro_template: null     # Optional first-second hook intro
+
+# NOTE (Phase 9): shortform has NO descript block — --polish is longform-only. Shortform clips
+# are cut FROM polished longform output and inherit polish through the cut; `cme process --mode
+# shortform --polish` errors with guidance. Polish the longform first, then cut shortform from it.

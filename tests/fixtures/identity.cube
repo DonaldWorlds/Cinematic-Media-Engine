@@ -1,0 +1,12 @@
+# Identity LUT for tests — maps every input to itself.
+# Committed (fixtures gitignore excludes only *.mp4/*.wav) so LUT command-string
+# tests do not depend on the owner-IP Sony LUT (gitignored under src/branding/luts/).
+LUT_3D_SIZE 2
+0.000000 0.000000 0.000000
+1.000000 0.000000 0.000000
+0.000000 1.000000 0.000000
+1.000000 1.000000 0.000000
+0.000000 0.000000 1.000000
+1.000000 0.000000 1.000000
+0.000000 1.000000 1.000000
+1.000000 1.000000 1.000000

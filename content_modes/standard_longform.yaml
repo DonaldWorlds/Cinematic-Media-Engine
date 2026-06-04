@@ -1,0 +1,96 @@
+# Standard Longform Mode Configuration
+# Purpose: Traditional long-form creator content (gameplay, streams, podcasts, casual vlogs)
+# Goal: Preserve chronology and conversational flow, minimize over-editing
+
+mode_name: standard_longform
+
+# Transcription — OFF by default. The SRT subtitle output (rendering.subtitles
+# below) is GATED behind --transcribe: no --transcribe means no SRT and the
+# subtitle config is ignored. YouTube auto-captions cover the default SEO case.
+transcription:
+  enabled: false
+  opt_in_flag: "--transcribe"
+  gates_srt: true               # subtitles.separate_file only produced when enabled
+
+# Scoring weights — which signals matter most for picking moments to keep
+# Must sum to 1.0
+scoring_weights:
+  transcript_quality: 0.30      # Clear speech, complete thoughts
+  pacing_consistency: 0.25      # Steady energy without dead zones
+  narrative_continuity: 0.20    # Coherent flow between segments
+  conversational: 0.15          # Authentic back-and-forth moments
+  audio_energy: 0.10            # Reaction peaks (lower weight than shortform)
+
+# Pacing rules — how segments are constructed
+pacing:
+  min_segment_sec: 30           # Don't keep anything shorter than 30 sec
+  max_segment_sec: 300          # Cap segments at 5 min for editability
+  preferred_duration_sec: 300   # Target cut length (Phase 7 window scorer): 5 min default, 3-10 min range
+  preserve_chronology: true     # Segments stay in original order
+  dead_air_threshold_sec: 8     # Cut gaps longer than 8 sec
+  fade_padding_sec: 0.5         # Brief padding around each kept segment
+
+# Rendering — how the output looks
+rendering:
+  transitions: hard_cut         # No fancy transitions
+  effects_intensity: minimal    # No zooms, no speed ramps
+  subtitles: separate_file      # SRT — ONLY emitted when --transcribe is passed (see transcription.gates_srt)
+  subtitle_format: srt
+  branding_intensity: subtle    # Small watermark only
+  color_grade: none             # No LUT applied
+  aspect_ratio: 16:9
+  resolution:
+    width: 1920
+    height: 1080
+  fps: 30
+  video_codec: h264
+  audio_codec: aac
+  bitrate_target: 8M
+
+# Phase 10 — Stage-1 technical correction. OFF by default for standard_longform:
+# Descript's Color Adjustments handle colour for this mode. Set enabled: true to
+# opt in (auto-detect exposure/WB/contrast before the cut; no LUT for standard).
+color_pipeline:
+  technical_correction:
+    enabled: false
+
+# Output configuration
+output:
+  base_dir: src/output/longform/standard   # parallel tree: cinematic lands at longform/cinematic (Phase 8)
+  filename_pattern: "{date}_{source_name}_standard_longform.mp4"
+  generate_thumbnails: true
+  thumbnail_count: 3                        # frame candidates extracted for Descript (was 5)
+  thumbnail_text_count: 3                   # short quotable phrases suggested for thumbnail text
+
+# Clip density — how aggressive the cuts are
+clip_density: low               # Keep more, cut less
+target_total_duration_min: 25   # Aim for ~25 min output (tune later)
+
+# Output targets — informational
+output_targets:
+  - youtube_longform
+  - archive_upload
+  - vod_repost
+
+# TwelveLabs queries for this mode
+twelvelabs_queries:
+  - "interesting conversational moment"
+  - "quotable line or memorable phrase"
+  - "natural narrative shift or topic change"
+  - "engaging gameplay or activity moment"
+
+# Branding elements
+branding:
+  intro_animation: branding/presets/standard_intro.json
+  outro_animation: branding/presets/standard_outro.json
+  watermark: branding/overlays/kkthedon_watermark_subtle.png
+  watermark_position: bottom_right
+  watermark_opacity: 0.4
+
+# Descript handoff (Phase 9; Phase 9.1: captions removed). One combined prompt: eye contact +
+# Studio Sound + color adjustments. NO captions — captions are shortform-only (engine burns them
+# via ffmpeg); longform/cinematic stay caption-free (see KNOWLEDGE.md "Caption policy"). No music.
+descript:
+  enabled: true
+  prompt: "Apply eye contact correction to the speaker. Apply Studio Sound. Apply color adjustments to balance exposure, contrast, and white balance."
+  publish_resolution: "1080p"

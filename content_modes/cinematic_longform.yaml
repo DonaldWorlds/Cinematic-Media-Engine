@@ -1,0 +1,65 @@
+# Cinematic Longform Mode — Phase 8 minimum viable
+# Single-stage LUT pipeline: S-Log3 + S-Gamut3.Cine → graded Rec.709 in one step
+# Pack expects S-Log3 input (match camera capture setting)
+# Future Phase 5 (OpenCLIP) will enable openclip_aesthetic signal
+# Future Phase 9+ may add cinematic-specific features (4K, 24fps, transitions, multi-source)
+
+mode_name: cinematic_longform
+
+transcription:
+  enabled: false
+  opt_in_flag: "--transcribe"
+
+scoring_weights:
+  emotional_moments: 0.25
+  lighting_quality: 0.20
+  visual_composition: 0.20
+  pacing_curve: 0.15
+  openclip_aesthetic: 0.10
+  soundtrack_sync: 0.10
+
+clip_density: medium
+
+pacing:
+  preferred_duration_sec: 300
+  min_segment_sec: 60
+  max_segment_sec: 600
+
+rendering:
+  aspect_ratio: 16:9
+  resolution:
+    width: 1920
+    height: 1080
+  video_codec: h264
+  audio_codec: aac
+
+color_grade:
+  enabled: true
+  lut_path: src/branding/luts/creativeStyles/cinematic_default.cube
+  interp: tetrahedral
+
+# Phase 10 — Stage-1 technical correction runs BEFORE the LUT above (LUTs assume
+# normalized input). REQUIRED for cinematic. Auto-detect by default; uncomment a
+# component and set mode: override to pin a value for a specific shoot.
+color_pipeline:
+  technical_correction:
+    enabled: true
+    # exposure: { mode: override, override_value: 0.0 }
+    # white_balance: { mode: override, override_kelvin: 5600 }
+    # contrast: { mode: override, override_curve: medium }
+
+output:
+  base_dir: src/output/longform/cinematic
+  filename_pattern: "{date}_{source_name}_cinematic_longform.mp4"
+  thumbnail_count: 3
+  thumbnail_text_count: 3
+
+# Descript handoff (Phase 9) — engine's Sony LUT grade stays baked in; Descript adds color
+# adjustments on top (per owner), Studio Sound, eye contact, and the USER-PROVIDED music bed
+# (imported as a 2nd media, then placed by Underlord). No captions. Drop cinematic_bed.mp3
+# into src/branding/music/ before running --polish on this mode.
+descript:
+  enabled: true
+  prompt: "Apply eye contact correction to the speaker. Apply Studio Sound. Apply color adjustments to balance exposure, contrast, and white balance. Add the imported music track as subtle background music, ducked under any dialogue."
+  publish_resolution: "1080p"
+  music_path: src/branding/music/cinematic_bed.mp3
