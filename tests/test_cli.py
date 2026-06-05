@@ -447,7 +447,11 @@ def test_grade_command_dispatches_run_grade(tmp_path: Path, monkeypatch) -> None
     assert captured["mode"] == "cinematic_longform"  # default mode
     assert captured["kw"]["correct"] is True  # correction ON by default
     assert captured["kw"]["scale_to_mode"] is False  # native resolution by default
-    assert captured["kw"]["hardware"] is True  # hardware (videotoolbox) encode by default
+    assert captured["kw"]["codec"] == "prores"  # ProRes 422 HQ master by default
+    # h264-only knobs are not forwarded for the prores default
+    assert captured["kw"].get("quality") is None
+    assert captured["kw"].get("bitrate") is None
+    assert captured["kw"].get("hardware") is None
 
 
 def test_grade_command_flags_flow_through(tmp_path: Path, monkeypatch) -> None:
@@ -469,6 +473,8 @@ def test_grade_command_flags_flow_through(tmp_path: Path, monkeypatch) -> None:
             "grade",
             str(src),
             str(tmp_path / "o.mp4"),
+            "--codec",
+            "h264",
             "--no-correct",
             "--scale-to-mode",
             "--quality",
@@ -478,6 +484,7 @@ def test_grade_command_flags_flow_through(tmp_path: Path, monkeypatch) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
+    assert captured["kw"]["codec"] == "h264"
     assert captured["kw"]["correct"] is False
     assert captured["kw"]["scale_to_mode"] is True
     assert captured["kw"]["quality"] == 16
@@ -497,6 +504,26 @@ def test_grade_command_software_flag(tmp_path: Path, monkeypatch) -> None:
         raising=False,
     )
 
-    result = runner.invoke(cli.app, ["grade", str(src), str(tmp_path / "o.mp4"), "--software"])
+    result = runner.invoke(
+        cli.app, ["grade", str(src), str(tmp_path / "o.mp4"), "--codec", "h264", "--software"]
+    )
     assert result.exit_code == 0, result.output
-    assert captured["kw"]["hardware"] is False  # --software disables hardware encode
+    assert captured["kw"]["codec"] == "h264"
+    assert captured["kw"]["hardware"] is False  # --software disables hardware encode (h264 only)
+
+
+def test_grade_command_prores_rejects_h264_knobs(tmp_path: Path, monkeypatch) -> None:
+    """Fail loud: h264 knobs are invalid with the prores default; never reach the encode."""
+    from src import cli
+
+    src = tmp_path / "in.mp4"
+    src.write_bytes(b"x")
+    called = {"n": 0}
+    monkeypatch.setattr(
+        cli, "run_grade", lambda *a, **k: called.__setitem__("n", called["n"] + 1), raising=False
+    )
+
+    result = runner.invoke(cli.app, ["grade", str(src), str(tmp_path / "o.mov"), "--quality", "16"])
+    assert result.exit_code != 0  # rejected before any work
+    assert called["n"] == 0  # run_grade / the encode never reached
+    assert "prores" in result.output.lower() or "codec" in result.output.lower()

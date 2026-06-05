@@ -1840,7 +1840,7 @@ def test_build_grade_command_scale_to_mode_when_requested() -> None:
 
 
 def test_build_grade_command_uses_crf_18_by_default() -> None:
-    args = _grade_cmd()
+    args = _grade_cmd(codec="h264")
     assert args[args.index("-c:v") + 1] == "libx264"
     assert args[args.index("-crf") + 1] == "18"
     assert args[args.index("-preset") + 1] == "medium"
@@ -1848,12 +1848,12 @@ def test_build_grade_command_uses_crf_18_by_default() -> None:
 
 
 def test_build_grade_command_quality_override_sets_crf() -> None:
-    args = _grade_cmd(crf=16)
+    args = _grade_cmd(codec="h264", crf=16)
     assert args[args.index("-crf") + 1] == "16"
 
 
 def test_build_grade_command_bitrate_override_replaces_crf() -> None:
-    args = _grade_cmd(bitrate="50M")
+    args = _grade_cmd(codec="h264", bitrate="50M")
     assert args[args.index("-b:v") + 1] == "50M"
     assert "-crf" not in args  # explicit bitrate wins over CRF
 
@@ -1874,6 +1874,37 @@ def test_build_grade_command_full_order_correction_lut_scale() -> None:
     args = _grade_cmd(correction="eq=brightness=0.1", scale=True)
     vf = args[args.index("-vf") + 1]
     assert vf.index("eq=") < vf.index("lut3d") < vf.index("scale")
+
+
+# --------------------------------------------------------------------------- #
+# CP2 — ProRes 422 HQ grade master (10-bit 4:2:2). Default codec; h264 stays opt-in.
+# --------------------------------------------------------------------------- #
+
+
+def test_build_grade_command_prores_is_default_422_10bit() -> None:
+    """Grade master defaults to ProRes 422 HQ: 10-bit 4:2:2, profile-fixed, no h264 knobs."""
+    args = _grade_cmd()  # codec defaults to prores
+    assert args[args.index("-c:v") + 1] == "prores_ks"
+    assert args[args.index("-profile:v") + 1] == "3"  # ProRes 422 HQ
+    assert args[args.index("-pix_fmt") + 1] == "yuv422p10le"  # 10-bit 4:2:2
+    assert (
+        "-crf" not in args and "-q:v" not in args and "-b:v" not in args and "-preset" not in args
+    )
+    assert args[args.index("-c:a") + 1] == "copy"
+    assert "+faststart" in args
+
+
+def test_build_grade_command_prores_vf_chain_unchanged() -> None:
+    args = _grade_cmd(codec="prores", correction="eq=brightness=0.1", scale=True)
+    vf = args[args.index("-vf") + 1]
+    assert vf.index("eq=") < vf.index("lut3d") < vf.index("scale")  # correction->LUT->scale intact
+
+
+def test_build_grade_command_prores_emits_no_h264_knobs_even_if_passed() -> None:
+    # builder is lenient for prores (run_grade/CLI is the loud gate); never emits crf/qv/bitrate
+    args = _grade_cmd(codec="prores", crf=14, bitrate="50M", encoder="h264_videotoolbox")
+    assert args[args.index("-c:v") + 1] == "prores_ks"
+    assert "-crf" not in args and "-q:v" not in args and "-b:v" not in args
 
 
 def test_run_grade_resolves_mode_color_grade(tmp_path: Path, monkeypatch) -> None:
@@ -1977,9 +2008,14 @@ def test_run_grade_quality_flows_per_branch(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
     monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
-    # hardware (default): --quality maps to videotoolbox -q:v (no -crf)
+    # hardware (the h264 default): --quality maps to videotoolbox -q:v (no -crf)
     run_grade(
-        Path("in.mp4"), tmp_path / "hw.mp4", load_config(), _cinematic_mode_with_lut(), quality=14
+        Path("in.mp4"),
+        tmp_path / "hw.mp4",
+        load_config(),
+        _cinematic_mode_with_lut(),
+        codec="h264",
+        quality=14,
     )
     hw = cmds[0]
     assert hw[hw.index("-c:v") + 1] == "h264_videotoolbox"
@@ -1994,6 +2030,7 @@ def test_run_grade_quality_flows_per_branch(tmp_path: Path, monkeypatch) -> None
         tmp_path / "sw.mp4",
         load_config(),
         _cinematic_mode_with_lut(),
+        codec="h264",
         hardware=False,
         quality=16,
     )
@@ -2017,6 +2054,7 @@ def test_run_grade_bitrate_wins_on_both_branches(tmp_path: Path, monkeypatch) ->
         tmp_path / "hw.mp4",
         load_config(),
         _cinematic_mode_with_lut(),
+        codec="h264",
         bitrate="50M",
     )  # hardware default
     run_grade(
@@ -2024,6 +2062,7 @@ def test_run_grade_bitrate_wins_on_both_branches(tmp_path: Path, monkeypatch) ->
         tmp_path / "sw.mp4",
         load_config(),
         _cinematic_mode_with_lut(),
+        codec="h264",
         hardware=False,
         bitrate="50M",
     )
@@ -2080,7 +2119,7 @@ def test_run_grade_smoke_produces_native_res_graded_file(tmp_path: Path) -> None
         capture_output=True,
     )
     out = tmp_path / "graded.mp4"
-    result = run_grade(src, out, load_config(), _cinematic_mode_with_lut())
+    result = run_grade(src, out, load_config(), _cinematic_mode_with_lut(), codec="h264")
     assert result == out
     assert out.exists() and out.stat().st_size > 0
     probe = ffprobe_json(out)
@@ -2107,27 +2146,27 @@ def test_crf_to_vt_quality_inversion() -> None:
 
 
 def test_build_grade_command_software_uses_crf_no_vt() -> None:
-    args = _grade_cmd(encoder="libx264")
+    args = _grade_cmd(codec="h264", encoder="libx264")
     assert args[args.index("-c:v") + 1] == "libx264"
     assert args[args.index("-crf") + 1] == "18" and args[args.index("-preset") + 1] == "medium"
     assert "-q:v" not in args  # never a videotoolbox quality flag on the software path
 
 
 def test_build_grade_command_hardware_uses_qv_no_libx264_flags() -> None:
-    args = _grade_cmd(encoder="h264_videotoolbox")
+    args = _grade_cmd(codec="h264", encoder="h264_videotoolbox")
     assert args[args.index("-c:v") + 1] == "h264_videotoolbox"
     assert args[args.index("-q:v") + 1] == "65"  # CRF 18 -> q:v 65
     assert "-crf" not in args and "-preset" not in args  # never libx264-only flags to videotoolbox
 
 
 def test_build_grade_command_hardware_quality_maps_from_crf() -> None:
-    hi = _grade_cmd(encoder="h264_videotoolbox", crf=14)
-    lo = _grade_cmd(encoder="h264_videotoolbox", crf=28)
+    hi = _grade_cmd(codec="h264", encoder="h264_videotoolbox", crf=14)
+    lo = _grade_cmd(codec="h264", encoder="h264_videotoolbox", crf=28)
     assert int(hi[hi.index("-q:v") + 1]) > 65 > int(lo[lo.index("-q:v") + 1])
 
 
 def test_build_grade_command_hardware_bitrate_override() -> None:
-    args = _grade_cmd(encoder="h264_videotoolbox", bitrate="50M")
+    args = _grade_cmd(codec="h264", encoder="h264_videotoolbox", bitrate="50M")
     assert args[args.index("-b:v") + 1] == "50M"
     assert "-q:v" not in args and "-crf" not in args and "-preset" not in args
 
@@ -2142,9 +2181,15 @@ def test_run_grade_hardware_by_default(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
     monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
-    run_grade(Path("in.mp4"), tmp_path / "out.mp4", load_config(), _cinematic_mode_with_lut())
+    run_grade(
+        Path("in.mp4"),
+        tmp_path / "out.mp4",
+        load_config(),
+        _cinematic_mode_with_lut(),
+        codec="h264",
+    )
     cmd = cmds[0]
-    assert cmd[cmd.index("-c:v") + 1] == "h264_videotoolbox"
+    assert cmd[cmd.index("-c:v") + 1] == "h264_videotoolbox"  # videotoolbox is the h264 default
     assert "-q:v" in cmd and "-crf" not in cmd and "-preset" not in cmd
 
 
@@ -2163,6 +2208,7 @@ def test_run_grade_software_flag_uses_libx264_crf(tmp_path: Path, monkeypatch) -
         tmp_path / "out.mp4",
         load_config(),
         _cinematic_mode_with_lut(),
+        codec="h264",
         hardware=False,
     )
     cmd = cmds[0]
@@ -2187,10 +2233,63 @@ def test_run_grade_no_silent_fallback_fails_loud(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     with pytest.raises(FFmpegError):
-        run_grade(Path("in.mp4"), tmp_path / "out.mp4", load_config(), _cinematic_mode_with_lut())
+        run_grade(
+            Path("in.mp4"),
+            tmp_path / "out.mp4",
+            load_config(),
+            _cinematic_mode_with_lut(),
+            codec="h264",
+        )
     assert len(cmds) == 1  # no retry
     assert cmds[0][cmds[0].index("-c:v") + 1] == "h264_videotoolbox"
     assert "libx264" not in cmds[0]  # never falls back to the 4K-crashing software path
+
+
+def test_run_grade_prores_master_by_default_is_422_10bit(tmp_path: Path, monkeypatch) -> None:
+    import src.render.longform as lf
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    cmds: list = []
+    monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction(""))
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
+
+    run_grade(Path("in.mp4"), tmp_path / "out.mov", load_config(), _cinematic_mode_with_lut())
+    cmd = cmds[0]
+    assert cmd[cmd.index("-c:v") + 1] == "prores_ks"
+    assert cmd[cmd.index("-profile:v") + 1] == "3"
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv422p10le"
+    assert "-q:v" not in cmd and "-crf" not in cmd and "-b:v" not in cmd
+
+
+def _expect_prores_rejects(tmp_path, monkeypatch, **knob):
+    import src.render.longform as lf
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    monkeypatch.setattr(
+        lf, "run_ffmpeg", lambda *a, **k: pytest.fail("must not encode when a knob is rejected")
+    )
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction(""))
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="prores"):
+        run_grade(
+            Path("in.mp4"), tmp_path / "out.mov", load_config(), _cinematic_mode_with_lut(), **knob
+        )
+
+
+def test_run_grade_prores_rejects_quality_knob(tmp_path: Path, monkeypatch) -> None:
+    _expect_prores_rejects(tmp_path, monkeypatch, quality=14)
+
+
+def test_run_grade_prores_rejects_bitrate_knob(tmp_path: Path, monkeypatch) -> None:
+    _expect_prores_rejects(tmp_path, monkeypatch, bitrate="50M")
+
+
+def test_run_grade_prores_rejects_hardware_flag(tmp_path: Path, monkeypatch) -> None:
+    _expect_prores_rejects(tmp_path, monkeypatch, hardware=False)
+    _expect_prores_rejects(tmp_path, monkeypatch, hardware=True)
 
 
 @pytest.mark.integration
@@ -2221,9 +2320,45 @@ def test_run_grade_software_smoke(tmp_path: Path) -> None:
         capture_output=True,
     )
     out = tmp_path / "graded.mp4"
-    run_grade(src, out, load_config(), _cinematic_mode_with_lut(), hardware=False)
+    run_grade(src, out, load_config(), _cinematic_mode_with_lut(), codec="h264", hardware=False)
     assert out.exists() and out.stat().st_size > 0
     probe = ffprobe_json(out)
     video = next(s for s in probe["streams"] if s["codec_type"] == "video")
     assert video["codec_name"] == "h264"
     assert int(video["width"]) == 640 and int(video["height"]) == 360
+
+
+@pytest.mark.integration
+def test_run_grade_prores_smoke_outputs_real_422_10bit(tmp_path: Path) -> None:
+    import subprocess
+
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    src = tmp_path / "in.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=10:duration=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    out = tmp_path / "graded.mov"
+    run_grade(src, out, load_config(), _cinematic_mode_with_lut())  # ProRes is the default master
+    assert out.exists() and out.stat().st_size > 0
+    probe = ffprobe_json(out)
+    video = next(s for s in probe["streams"] if s["codec_type"] == "video")
+    assert video["codec_name"] == "prores"
+    assert video["pix_fmt"] == "yuv422p10le"  # real 10-bit 4:2:2 preserved through the encode

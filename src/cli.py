@@ -342,33 +342,71 @@ def grade(
         "--keep-resolution/--scale-to-mode",
         help="Preserve input resolution (default); --scale-to-mode downscales to the mode size.",
     ),
-    hardware: bool = typer.Option(
-        True,
+    codec: str = typer.Option(
+        "prores",
+        "--codec",
+        help="Master codec: 'prores' (ProRes 422 HQ, 10-bit 4:2:2, default) | 'h264'.",
+    ),
+    hardware: bool | None = typer.Option(
+        None,
         "--hardware/--software",
-        help="Encode on the M1 media engine (h264_videotoolbox; default). --software = libx264 CRF.",
+        help="h264 only: M1 media engine h264_videotoolbox (default) vs --software libx264 CRF.",
     ),
-    quality: int = typer.Option(
-        18,
+    quality: int | None = typer.Option(
+        None,
         "--quality",
-        help="Quality on the CRF scale (lower = better); maps to -q:v on --hardware.",
+        help="h264 only: quality on the CRF scale (lower = better); maps to -q:v on --hardware.",
     ),
-    bitrate: str | None = typer.Option(None, "--bitrate", help="Force a fixed bitrate (e.g. 50M)."),
+    bitrate: str | None = typer.Option(
+        None, "--bitrate", help="h264 only: force a fixed bitrate (e.g. 50M)."
+    ),
 ) -> None:
     """Apply a mode's LUT grade to a FULL input file — no selection, no cut."""
+    if codec not in ("prores", "h264"):
+        raise typer.BadParameter("--codec must be 'prores' or 'h264'")
+    if codec == "prores":
+        # ProRes 422 HQ is profile-fixed; h264 quality knobs are invalid with it — fail fast.
+        rejected = [
+            name
+            for name, value in (
+                ("--quality", quality),
+                ("--bitrate", bitrate),
+                ("--hardware/--software", hardware),
+            )
+            if value is not None
+        ]
+        if rejected:
+            verb = "has" if len(rejected) == 1 else "have"
+            raise typer.BadParameter(
+                f"{', '.join(rejected)} {verb} no effect with --codec prores "
+                f"(profile-fixed 422 HQ master); use --codec h264 for quality control."
+            )
     config = load_config()
     setup_logging(config.logging.level, rich_console=config.logging.rich_console)
     mode_cfg = load_mode_config(mode)
-    out = run_grade(
-        source,
-        output,
-        config,
-        mode_cfg,
-        correct=correct,
-        scale_to_mode=not keep_resolution,
-        quality=quality,
-        bitrate=bitrate,
-        hardware=hardware,
-    )
+    if codec == "prores":
+        out = run_grade(
+            source,
+            output,
+            config,
+            mode_cfg,
+            correct=correct,
+            scale_to_mode=not keep_resolution,
+            codec="prores",
+        )
+    else:
+        out = run_grade(
+            source,
+            output,
+            config,
+            mode_cfg,
+            correct=correct,
+            scale_to_mode=not keep_resolution,
+            codec="h264",
+            quality=quality,
+            bitrate=bitrate,
+            hardware=hardware,
+        )
     console.print(f"[bold]Graded[/bold] {source} -> {out}")
 
 

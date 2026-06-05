@@ -37,8 +37,9 @@ __all__ = [
 
 _log = get_logger(__name__)
 
-# Quality flags whose value (the next arg) records what the encoder ACTUALLY used.
-_QUALITY_FLAGS = ("-b:v", "-crf", "-preset", "-q:v")
+# Quality flags whose value (the next arg) records what the encoder ACTUALLY used
+# (h264: -b:v/-crf/-preset/-q:v; prores: -profile:v).
+_QUALITY_FLAGS = ("-b:v", "-crf", "-preset", "-q:v", "-profile:v")
 
 
 class InputInfo(BaseModel):

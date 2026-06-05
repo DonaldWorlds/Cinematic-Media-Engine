@@ -86,6 +86,16 @@ def test_encoder_quality_from_args_bitrate() -> None:
     assert _encoder_quality_from_args(["-c:v", "libx264", "-b:v", "50M"]) == {"b:v": "50M"}
 
 
+def test_encoder_quality_from_args_prores_profile() -> None:
+    """CP2: the prores master records its profile so the report shows the encoder settings."""
+    from src.render.grade_report import _encoder_quality_from_args
+
+    q = _encoder_quality_from_args(
+        ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    )
+    assert q == {"profile:v": "3"}
+
+
 def test_report_path_appends_report_json() -> None:
     from src.render.grade_report import report_path_for
 
@@ -243,4 +253,5 @@ def test_run_grade_emits_report_sidecar(tmp_path: Path, monkeypatch) -> None:
     assert data["correction"]["contrast_normalization"] is False
     assert "curves" not in data["correction"]["filter"]
     assert data["lut"]["applied_after_correction"] is True
-    assert data["encoder"]["name"] == "h264_videotoolbox"
+    assert data["encoder"]["name"] == "prores_ks"  # default master is now ProRes 422 HQ
+    assert data["encoder"]["quality"] == {"profile:v": "3"}  # profile recorded in the report

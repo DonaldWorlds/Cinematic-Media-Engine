@@ -373,6 +373,7 @@ def build_grade_command(
     fmt: RenderFormat,
     correction: str = "",
     scale: bool = False,
+    codec: str = "prores",
     crf: int = 18,
     bitrate: str | None = None,
     encoder: str = "libx264",
@@ -381,23 +382,34 @@ def build_grade_command(
     """ffmpeg args to grade a FULL file (no ``-ss``/``-t`` cut, native fps preserved).
 
     vf is ``[correction,]lut3d[,scale]`` — same ordering as the cut path
-    (``build_longform_command``) but over the whole input. Quality flags branch on
-    ``encoder``: libx264 -> ``-crf``/``-preset`` (resolution-independent CRF master);
-    h264_videotoolbox -> ``-q:v`` constant quality ONLY (never libx264 flags). ``bitrate``
-    forces ABR and wins on both. Audio is stream-copied (video-only change).
+    (``build_longform_command``) but over the whole input; the vf is identical across codecs.
+
+    ``codec`` selects the master format:
+    - ``prores`` (default): ProRes 422 HQ — ``-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le``,
+      10-bit 4:2:2, visually lossless and light on an 8GB M1 (intra-frame). Profile-fixed: the
+      h264 quality knobs (``crf``/``bitrate``/``encoder``) do NOT apply and are not emitted.
+    - ``h264``: quality flags branch on ``encoder`` — libx264 -> ``-crf``/``-preset`` (CRF master);
+      h264_videotoolbox -> ``-q:v`` constant quality ONLY. ``bitrate`` forces ABR and wins on both.
+
+    Audio is stream-copied (video-only change).
     """
     vf = f"lut3d={lut.path}:interp={lut.interp}"
     if scale:
         vf = f"{vf},scale={fmt.width}:{fmt.height}"
     if correction:
         vf = f"{correction},{vf}"
-    args = ["-y", "-i", str(source), "-vf", vf, "-c:v", encoder]
-    if bitrate:
-        args += ["-b:v", bitrate]  # explicit ABR override — wins on BOTH encoders
-    elif encoder == "libx264":
-        args += ["-crf", str(crf), "-preset", preset]  # software CRF master
-    else:  # h264_videotoolbox: constant quality ONLY — never libx264's -crf/-preset
-        args += ["-q:v", str(_crf_to_vt_quality(crf))]
+    args = ["-y", "-i", str(source), "-vf", vf]
+    if codec == "prores":
+        # ProRes 422 HQ master — profile-fixed; h264 knobs intentionally ignored here.
+        args += ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    else:
+        args += ["-c:v", encoder]
+        if bitrate:
+            args += ["-b:v", bitrate]  # explicit ABR override — wins on BOTH encoders
+        elif encoder == "libx264":
+            args += ["-crf", str(crf), "-preset", preset]  # software CRF master
+        else:  # h264_videotoolbox: constant quality ONLY — never libx264's -crf/-preset
+            args += ["-q:v", str(_crf_to_vt_quality(crf))]
     args += ["-c:a", "copy", "-movflags", "+faststart", str(output)]
     return args
 
@@ -410,9 +422,10 @@ def run_grade(
     *,
     correct: bool = True,
     scale_to_mode: bool = False,
-    quality: int = 18,
+    codec: str = "prores",
+    quality: int | None = None,
     bitrate: str | None = None,
-    hardware: bool = True,
+    hardware: bool | None = None,
 ) -> Path:
     """Apply ``mode``'s LUT grade to a FULL input file — no selection, no cut.
 
@@ -420,13 +433,33 @@ def run_grade(
     contrast) is ON by default, auto-detected over the input's own ``[0, duration]`` via
     ``resolve_correction`` (which clamps the sentinel end to the real readable duration). Every
     run writes an auditable ``<output>.report.json`` sidecar. Native resolution unless
-    ``scale_to_mode``. Encodes on the M1
-    media engine (``h264_videotoolbox``, ``-q:v`` constant quality) by default — software 4K
-    libx264 exhausts an 8GB M1; ``hardware=False`` switches to libx264 CRF. ``bitrate`` forces
-    ABR. ONE ``run_ffmpeg`` call with NO fallback: a hardware error fails loud (no libx264 retry
-    back into the 4K crash). Fails loud if the mode has no LUT or the source can't be read. No
-    workspace / no cache — each call is independent (per-file).
+    ``scale_to_mode``.
+
+    ``codec`` selects the master (default ``prores`` = ProRes 422 HQ, 10-bit 4:2:2 — preserves the
+    Sony source's bit depth/chroma for further Descript grading; intra-frame so light on an 8GB
+    M1). ProRes is profile-fixed, so the h264 knobs (``quality``/``bitrate``/``hardware``) are
+    INVALID with it and raise ``ValueError`` (use ``codec="h264"`` for quality control). With
+    ``codec="h264"`` behaviour is unchanged: ``hardware`` (default True) -> videotoolbox ``-q:v``
+    / libx264 ``-crf``, ``quality`` (default 18) and ``bitrate`` as before, ONE ``run_ffmpeg`` call
+    with NO fallback. Fails loud if the mode has no LUT or the source can't be read. No workspace /
+    no cache — each call is independent (per-file).
     """
+    if codec == "prores":
+        rejected = [
+            name
+            for name, value in (
+                ("--quality", quality),
+                ("--bitrate", bitrate),
+                ("--hardware/--software", hardware),
+            )
+            if value is not None
+        ]
+        if rejected:
+            verb = "has" if len(rejected) == 1 else "have"
+            raise ValueError(
+                f"{', '.join(rejected)} {verb} no effect with --codec prores "
+                f"(profile-fixed 422 HQ master); use --codec h264 for quality control."
+            )
     md = mode.model_dump()
     lut = resolve_lut_grade(md.get("color_grade", {}))
     if lut is None:
@@ -449,18 +482,33 @@ def run_grade(
         else None
     )
     correction = correction_result.filter_string if correction_result else ""
-    encoder = "h264_videotoolbox" if hardware else "libx264"
-    cmd = build_grade_command(
-        source,
-        output,
-        lut=lut,
-        fmt=fmt,
-        correction=correction,
-        scale=scale_to_mode,
-        crf=quality,
-        bitrate=bitrate,
-        encoder=encoder,
-    )
+    if codec == "prores":
+        encoder = "prores_ks"
+        cmd = build_grade_command(
+            source,
+            output,
+            lut=lut,
+            fmt=fmt,
+            correction=correction,
+            scale=scale_to_mode,
+            codec="prores",
+        )
+    else:
+        use_hardware = True if hardware is None else hardware  # h264 default: hardware
+        crf = 18 if quality is None else quality  # h264 default: CRF 18 (byte-identical to before)
+        encoder = "h264_videotoolbox" if use_hardware else "libx264"
+        cmd = build_grade_command(
+            source,
+            output,
+            lut=lut,
+            fmt=fmt,
+            correction=correction,
+            scale=scale_to_mode,
+            codec="h264",
+            crf=crf,
+            bitrate=bitrate,
+            encoder=encoder,
+        )
     ensure_dir(output.parent)
     run_ffmpeg(cmd)
     emit_grade_report(
@@ -473,9 +521,10 @@ def run_grade(
         cmd=cmd,
     )
     _log.info(
-        "grade: %s -> %s (encoder=%s, correct=%s, scale_to_mode=%s)",
+        "grade: %s -> %s (codec=%s, encoder=%s, correct=%s, scale_to_mode=%s)",
         source,
         output,
+        codec,
         encoder,
         correct,
         scale_to_mode,
