@@ -1,57 +1,53 @@
-"""Professional Color Pipeline — Stage 1 technical correction (Phase 10).
+"""Professional Color Pipeline — Stage 1 pre-LUT technical BALANCE (CP1).
 
-Window-scoped exposure / white-balance / contrast analysis that composes an ffmpeg
-filter string (``eq`` -> ``colorbalance`` -> ``curves``) to prepend BEFORE the Phase-8
-``lut3d`` grade. LUTs assume normalized input, so correction must precede the grade
-(KNOWLEDGE.md "Phase 10 Candidate" — critical ordering rule).
+Window-scoped exposure / white-balance analysis that composes an ffmpeg filter string
+(``eq`` -> ``colorbalance``) prepended BEFORE the Phase-8 ``lut3d`` grade.
 
-Auto-detect by default; a mode's ``color_pipeline`` YAML may override any component.
+CP1 principle (replaces the old "LUTs assume normalized input" premise, which was wrong
+for a log->Rec.709 conversion LUT and produced blown-out white):
+
+    A pre-LUT correction BALANCES the log signal so the LUT receives clean input. It must
+    NOT do the dynamic-range expansion the LUT itself does — the LUT owns contrast. So the
+    pre-LUT stage is exposure-balance + white-balance only, each a bounded NUDGE. There is
+    NO contrast curve here (a full-range stretch on flat log + the LUT's own expansion is
+    what clipped everything to white). Any contrast trim belongs AFTER the LUT, separately.
+
+Auto-detect by default; a mode's ``color_pipeline`` YAML may override either component.
 Fail-loud: an unopenable / unsamplable source raises rather than silently skipping —
 corrupt input would otherwise feed unpredictable colour into the LUT (KNOWLEDGE.md Q6).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
-    from ..config import (
-        ColorPipelineConfig,
-        ContrastSettings,
-        ExposureSettings,
-        WhiteBalanceSettings,
-    )
+    from ..config import ColorPipelineConfig
 
 __all__ = [
-    "analyze_contrast",
+    "CorrectionResult",
     "analyze_exposure",
     "analyze_white_balance",
     "build_correction_filter",
-    "contrast_curve_points",
     "exposure_adjustment",
     "get_correction_for_mode",
     "gray_world_gains",
     "kelvin_to_gains",
+    "resolve_correction",
     "window_sample_times",
 ]
 
 _EPS = 1e-6
-_MIDGRAY = 0.5  # exposure target (mean luma), v1 — KNOWLEDGE.md Phase 10 Q5
+_DEFAULT_TARGET_MIDGRAY = 0.41  # S-Log3 18% gray (~code 420/1023); balance auto-exposure here
+_DEFAULT_MAX_SHIFT = 0.10  # gentle bound on the exposure/WB nudge (balance, not slam/normalize)
 _WB_REFERENCE_KELVIN = 5600  # ~D65 neutral target for override-by-kelvin
 _DEFAULT_SAMPLE_FRAMES = 30
-
-# Override contrast presets -> normalized curve control points (stronger = more stretch).
-_CONTRAST_PRESETS: dict[str, dict[str, float]] = {
-    "soft": {"shadow_lift": 0.02, "midtone": 0.5, "highlight_roll": 0.98},
-    "medium": {"shadow_lift": 0.06, "midtone": 0.5, "highlight_roll": 0.94},
-    "high": {"shadow_lift": 0.12, "midtone": 0.5, "highlight_roll": 0.88},
-}
 
 
 # --------------------------------------------------------------------------- #
@@ -73,9 +69,17 @@ def window_sample_times(
     return [start + (i + 0.5) * span / sample_frames for i in range(sample_frames)]
 
 
-def exposure_adjustment(mean_luma: float) -> float:
-    """Brightness delta to pull mean luma toward mid-gray, clamped to the ffmpeg eq range."""
-    return float(max(-1.0, min(1.0, _MIDGRAY - mean_luma)))
+def exposure_adjustment(
+    mean_luma: float,
+    target: float = _DEFAULT_TARGET_MIDGRAY,
+    max_shift: float = _DEFAULT_MAX_SHIFT,
+) -> float:
+    """Bounded brightness delta nudging ``mean_luma`` toward the log mid-gray ``target``.
+
+    Balance, not normalize: the additive delta is clamped to ``[-max_shift, max_shift]`` so a
+    flat log image is gently re-centred for the LUT rather than slammed onto ``target``.
+    """
+    return float(max(-max_shift, min(max_shift, target - mean_luma)))
 
 
 def gray_world_gains(mean_rgb: tuple[float, float, float]) -> dict[str, float]:
@@ -87,16 +91,10 @@ def gray_world_gains(mean_rgb: tuple[float, float, float]) -> dict[str, float]:
     return {"red_gain": gray / r, "green_gain": gray / g, "blue_gain": gray / b}
 
 
-def contrast_curve_points(p5: float, p50: float, p95: float) -> dict[str, float]:
-    """Normalize measured luma percentiles into monotonic curve control points in ``[0,1]``."""
-    lo = float(max(0.0, min(1.0, p5)))
-    hi = float(max(0.0, min(1.0, p95)))
-    mid = float(max(lo, min(hi, max(0.0, min(1.0, p50)))))
-    return {"shadow_lift": lo, "midtone": mid, "highlight_roll": hi}
-
-
 def _kelvin_rgb(kelvin: int) -> tuple[float, float, float]:
     """Approximate normalized RGB of a blackbody at ``kelvin`` (Tanner Helland)."""
+    import math
+
     t = kelvin / 100.0
     if t <= 66:
         r = 255.0
@@ -144,9 +142,9 @@ def _fmt(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
 
 
-def _gain_to_midtone_shift(gain: float) -> float:
-    """Linear gain -> colorbalance midtone shift in ``[-1,1]`` (v1 approximation)."""
-    return max(-1.0, min(1.0, gain - 1.0))
+def _gain_to_midtone_shift(gain: float, max_shift: float = _DEFAULT_MAX_SHIFT) -> float:
+    """Linear gain -> bounded colorbalance midtone shift; clamped to ``[-max_shift, max_shift]``."""
+    return max(-max_shift, min(max_shift, gain - 1.0))
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +194,25 @@ def _sample_window(
 
 
 # --------------------------------------------------------------------------- #
-# Analyzers (window-scoped; BGR frames from OpenCV)
+# Frame -> stat reductions (pure; BGR frames from OpenCV). Cheap: no float64 expansion.
+# --------------------------------------------------------------------------- #
+
+
+def _mean_luma(frames: Sequence[np.ndarray]) -> float:
+    """Mean luma in ``[0,1]`` across ``frames`` (per-frame grayscale mean, then averaged)."""
+    lumas = [float(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).mean()) / 255.0 for f in frames]
+    return sum(lumas) / len(lumas)
+
+
+def _channel_means_rgb(frames: Sequence[np.ndarray]) -> tuple[float, float, float]:
+    """Mean ``(R, G, B)`` across ``frames`` (OpenCV decodes BGR; reorder on the way out)."""
+    per_frame = np.stack([f.reshape(-1, 3).mean(axis=0) for f in frames])  # BGR
+    channel_means = per_frame.mean(axis=0)
+    return (float(channel_means[2]), float(channel_means[1]), float(channel_means[0]))
+
+
+# --------------------------------------------------------------------------- #
+# Analyzers (window-scoped; sample then reduce). Kept as standalone public helpers.
 # --------------------------------------------------------------------------- #
 
 
@@ -206,10 +222,9 @@ def analyze_exposure(
     window_end_sec: float,
     sample_frames: int = _DEFAULT_SAMPLE_FRAMES,
 ) -> float:
-    """Mean-luma exposure delta within the window; ``0.0`` == already at mid-gray."""
+    """Bounded exposure-balance delta within the window (toward the default log mid-gray)."""
     frames = _sample_window(video_path, window_start_sec, window_end_sec, sample_frames)
-    lumas = [float(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).mean()) / 255.0 for f in frames]
-    return exposure_adjustment(sum(lumas) / len(lumas))
+    return exposure_adjustment(_mean_luma(frames))
 
 
 def analyze_white_balance(
@@ -220,97 +235,118 @@ def analyze_white_balance(
 ) -> dict[str, float]:
     """Gray-world RGB gain targets within the window (neutral D65 white point)."""
     frames = _sample_window(video_path, window_start_sec, window_end_sec, sample_frames)
-    per_frame = np.stack([f.reshape(-1, 3).mean(axis=0) for f in frames])  # BGR
-    channel_means = per_frame.mean(axis=0)
-    b = float(channel_means[0])
-    g = float(channel_means[1])
-    r = float(channel_means[2])
-    return gray_world_gains((r, g, b))
-
-
-def analyze_contrast(
-    video_path: Path,
-    window_start_sec: float,
-    window_end_sec: float,
-    sample_frames: int = _DEFAULT_SAMPLE_FRAMES,
-) -> dict[str, float]:
-    """Luma 5th/50th/95th-percentile curve points within the window (dynamic-range normalize)."""
-    frames = _sample_window(video_path, window_start_sec, window_end_sec, sample_frames)
-    lumas = (
-        np.concatenate([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).reshape(-1) for f in frames]).astype(
-            np.float64
-        )
-        / 255.0
-    )
-    p5 = float(np.percentile(lumas, 5))
-    p50 = float(np.percentile(lumas, 50))
-    p95 = float(np.percentile(lumas, 95))
-    return contrast_curve_points(p5, p50, p95)
+    return gray_world_gains(_channel_means_rgb(frames))
 
 
 # --------------------------------------------------------------------------- #
-# Filter composition + public entry point
+# Filter composition + structured result + public entry point
 # --------------------------------------------------------------------------- #
 
 
 def build_correction_filter(
     exposure: float | None,
     wb: dict[str, float] | None,
-    contrast: dict[str, float] | None,
+    *,
+    wb_max_shift: float = _DEFAULT_MAX_SHIFT,
 ) -> str:
-    """Compose ``eq,colorbalance,curves`` (in that order) from resolved correction values.
+    """Compose ``eq,colorbalance`` (in that order) from resolved balance values.
 
-    Returns ``""`` when every component is ``None``. White balance uses the colorbalance
-    MIDTONE band (``rm/gm/bm``) — most subject content (skin tones) sits in midtones, not
-    shadows; this deviates from a shadows-band correction by design (KNOWLEDGE.md Phase 10).
+    Returns ``""`` when both components are ``None``. NO contrast curve is ever emitted —
+    the LUT owns dynamic range (CP1). White balance uses the colorbalance MIDTONE band
+    (``rm/gm/bm``) — most subject content (skin tones) sits in midtones — each shift clamped
+    to ``wb_max_shift`` so the balance stays a gentle nudge.
     """
     parts: list[str] = []
     if exposure is not None:
         parts.append(f"eq=brightness={_fmt(exposure)}")
     if wb is not None:
-        rm = _gain_to_midtone_shift(wb["red_gain"])
-        gm = _gain_to_midtone_shift(wb["green_gain"])
-        bm = _gain_to_midtone_shift(wb["blue_gain"])
+        rm = _gain_to_midtone_shift(wb["red_gain"], wb_max_shift)
+        gm = _gain_to_midtone_shift(wb["green_gain"], wb_max_shift)
+        bm = _gain_to_midtone_shift(wb["blue_gain"], wb_max_shift)
         parts.append(f"colorbalance=rm={_fmt(rm)}:gm={_fmt(gm)}:bm={_fmt(bm)}")
-    if contrast is not None:
-        sl = _fmt(contrast["shadow_lift"])
-        mt = _fmt(contrast["midtone"])
-        hr = _fmt(contrast["highlight_roll"])
-        parts.append(f"curves=all='{sl}/0 {mt}/0.5 {hr}/1'")
     return ",".join(parts)
 
 
-def _resolve_exposure(
-    settings: ExposureSettings,
+class CorrectionResult(BaseModel):
+    """Resolved pre-LUT balance: the ffmpeg filter string + the measured/computed values
+    behind it, for the auditable grade report. ``contrast_normalization`` is always ``False``
+    (the LUT owns contrast) — recorded explicitly so a regression is visible in the report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    filter_string: str
+    contrast_normalization: bool = False
+    mean_luma: float | None = None
+    channel_means_rgb: tuple[float, float, float] | None = None
+    target_midgray: float | None = None
+    exposure_offset: float | None = None
+    wb_shifts: dict[str, float] | None = None
+
+
+def resolve_correction(
     video_path: Path,
     window_start_sec: float,
     window_end_sec: float,
-) -> float | None:
-    if settings.mode == "override":
-        return settings.override_value
-    return analyze_exposure(video_path, window_start_sec, window_end_sec)
+    color_pipeline_config: ColorPipelineConfig,
+) -> CorrectionResult:
+    """Resolve the pre-LUT balance for a mode into a ``CorrectionResult``.
 
+    Samples the window AT MOST ONCE and feeds both exposure and white balance from the same
+    frames (no double-decode of 4K). Auto components sample; override components skip sampling.
+    Disabled correction returns an empty, unsampled result. Raises on an unanalyzable source.
+    """
+    tc = color_pipeline_config.technical_correction
+    if not tc.enabled:
+        return CorrectionResult(enabled=False, filter_string="")
 
-def _resolve_wb(
-    settings: WhiteBalanceSettings,
-    video_path: Path,
-    window_start_sec: float,
-    window_end_sec: float,
-) -> dict[str, float] | None:
-    if settings.mode == "override":
-        return kelvin_to_gains(settings.override_kelvin) if settings.override_kelvin else None
-    return analyze_white_balance(video_path, window_start_sec, window_end_sec)
+    exp = tc.exposure
+    wb = tc.white_balance
+    need_sample = exp.mode == "auto" or wb.mode == "auto"
+    frames = (
+        _sample_window(video_path, window_start_sec, window_end_sec, _DEFAULT_SAMPLE_FRAMES)
+        if need_sample
+        else None
+    )
 
+    mean_luma: float | None = None
+    if exp.mode == "override":
+        exposure_offset = exp.override_value
+        target_midgray = None
+    else:
+        assert frames is not None
+        mean_luma = _mean_luma(frames)
+        exposure_offset = exposure_adjustment(mean_luma, exp.target_midgray, exp.max_shift)
+        target_midgray = exp.target_midgray
 
-def _resolve_contrast(
-    settings: ContrastSettings,
-    video_path: Path,
-    window_start_sec: float,
-    window_end_sec: float,
-) -> dict[str, float] | None:
-    if settings.mode == "override":
-        return dict(_CONTRAST_PRESETS[settings.override_curve]) if settings.override_curve else None
-    return analyze_contrast(video_path, window_start_sec, window_end_sec)
+    channel_means: tuple[float, float, float] | None = None
+    if wb.mode == "override":
+        wb_gains = kelvin_to_gains(wb.override_kelvin) if wb.override_kelvin else None
+    else:
+        assert frames is not None
+        channel_means = _channel_means_rgb(frames)
+        wb_gains = gray_world_gains(channel_means)
+
+    filter_string = build_correction_filter(exposure_offset, wb_gains, wb_max_shift=wb.max_shift)
+    wb_shifts = (
+        {
+            "rm": _gain_to_midtone_shift(wb_gains["red_gain"], wb.max_shift),
+            "gm": _gain_to_midtone_shift(wb_gains["green_gain"], wb.max_shift),
+            "bm": _gain_to_midtone_shift(wb_gains["blue_gain"], wb.max_shift),
+        }
+        if wb_gains is not None
+        else None
+    )
+    return CorrectionResult(
+        enabled=True,
+        filter_string=filter_string,
+        contrast_normalization=False,
+        mean_luma=mean_luma,
+        channel_means_rgb=channel_means,
+        target_midgray=target_midgray,
+        exposure_offset=exposure_offset,
+        wb_shifts=wb_shifts,
+    )
 
 
 def get_correction_for_mode(
@@ -319,15 +355,11 @@ def get_correction_for_mode(
     window_end_sec: float,
     color_pipeline_config: ColorPipelineConfig,
 ) -> str:
-    """Window-tuned correction filter for a mode, or ``""`` when correction is disabled.
+    """Window-tuned pre-LUT balance filter for a mode, or ``""`` when correction is disabled.
 
-    Auto components sample ``video_path`` within ``[window_start_sec, window_end_sec]``;
-    override components skip sampling entirely. Raises on an unanalyzable source.
+    Thin wrapper over :func:`resolve_correction` returning just its filter string (the cut
+    path consumes this); ``run_grade`` calls ``resolve_correction`` directly for the report.
     """
-    tc = color_pipeline_config.technical_correction
-    if not tc.enabled:
-        return ""
-    exposure = _resolve_exposure(tc.exposure, video_path, window_start_sec, window_end_sec)
-    wb = _resolve_wb(tc.white_balance, video_path, window_start_sec, window_end_sec)
-    contrast = _resolve_contrast(tc.contrast, video_path, window_start_sec, window_end_sec)
-    return build_correction_filter(exposure, wb, contrast)
+    return resolve_correction(
+        video_path, window_start_sec, window_end_sec, color_pipeline_config
+    ).filter_string

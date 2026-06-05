@@ -73,12 +73,9 @@ def _cp_config(
     exposure_override: float | None = None,
     wb_mode: str = "auto",
     wb_kelvin: int | None = None,
-    contrast_mode: str = "auto",
-    contrast_curve: str | None = None,
 ):
     from src.config import (
         ColorPipelineConfig,
-        ContrastSettings,
         ExposureSettings,
         TechnicalCorrectionSettings,
         WhiteBalanceSettings,
@@ -89,7 +86,6 @@ def _cp_config(
             enabled=enabled,
             exposure=ExposureSettings(mode=exposure_mode, override_value=exposure_override),
             white_balance=WhiteBalanceSettings(mode=wb_mode, override_kelvin=wb_kelvin),
-            contrast=ContrastSettings(mode=contrast_mode, override_curve=contrast_curve),
         )
     )
 
@@ -193,15 +189,22 @@ def test_window_sample_times_clamps_to_duration() -> None:
         window_sample_times(300.0, 360.0, 30, duration=254.0)  # window past EOF -> empty
 
 
-def test_exposure_adjustment_targets_midgray() -> None:
+def test_exposure_adjustment_balances_toward_log_midgray_and_is_bounded() -> None:
+    """Balance toward the log mid-gray target (default 0.41, NOT display 0.5), clamped to a
+    gentle ``max_shift`` so a pre-LUT correction nudges rather than normalizes (CP1)."""
     from src.render.color_pipeline import exposure_adjustment
 
-    assert exposure_adjustment(0.5) == pytest.approx(0.0)
-    assert exposure_adjustment(0.25) == pytest.approx(0.25)
-    assert exposure_adjustment(0.9) == pytest.approx(-0.4)
-    assert exposure_adjustment(0.0) == pytest.approx(0.5)
-    v = exposure_adjustment(0.5)
-    assert isinstance(v, float) and -1.0 <= v <= 1.0
+    # already at the log mid-gray target -> no shift
+    assert exposure_adjustment(0.41, target=0.41, max_shift=0.10) == pytest.approx(0.0)
+    # slightly under target -> small positive nudge (within bound)
+    assert exposure_adjustment(0.35, target=0.41, max_shift=0.10) == pytest.approx(0.06)
+    # far under -> clamped UP to +max_shift (balance, never slam to 0.41)
+    assert exposure_adjustment(0.0, target=0.41, max_shift=0.10) == pytest.approx(0.10)
+    # far over -> clamped DOWN to -max_shift
+    assert exposure_adjustment(0.9, target=0.41, max_shift=0.10) == pytest.approx(-0.10)
+    # default target is the S-Log3 log mid-gray (0.41), not display mid-gray (0.5)
+    assert exposure_adjustment(0.41) == pytest.approx(0.0)
+    assert exposure_adjustment(0.5) != pytest.approx(0.0)
 
 
 def test_gray_world_gains_neutral_input_returns_unity() -> None:
@@ -235,13 +238,15 @@ def test_gray_world_gains_epsilon_guards_zero_channel() -> None:
     assert g["red_gain"] > 1.0  # finite, epsilon-guarded (no ZeroDivisionError)
 
 
-def test_contrast_curve_points_keys_and_order() -> None:
-    from src.render.color_pipeline import contrast_curve_points
+def test_contrast_helpers_are_removed() -> None:
+    """CP1: pre-LUT contrast normalization is gone — the LUT owns contrast. The symbols
+    must not exist on the module (guards against a silent re-introduction)."""
+    import src.render.color_pipeline as cp
 
-    c = contrast_curve_points(0.05, 0.5, 0.95)
-    assert set(c) == {"shadow_lift", "midtone", "highlight_roll"}
-    assert all(0.0 <= v <= 1.0 for v in c.values())
-    assert c["shadow_lift"] <= c["midtone"] <= c["highlight_roll"]
+    assert not hasattr(cp, "contrast_curve_points")
+    assert not hasattr(cp, "analyze_contrast")
+    assert "analyze_contrast" not in cp.__all__
+    assert "contrast_curve_points" not in cp.__all__
 
 
 def test_kelvin_to_gains_neutral_at_reference() -> None:
@@ -276,15 +281,6 @@ def test_analyze_white_balance_returns_three_gain_values(sample_video: Path) -> 
     wb = analyze_white_balance(sample_video, 5.0, 45.0)
     assert set(wb) == {"red_gain", "green_gain", "blue_gain"}
     assert all(isinstance(v, float) and v > 0 for v in wb.values())
-
-
-def test_analyze_contrast_returns_curve_points(sample_video: Path) -> None:
-    from src.render.color_pipeline import analyze_contrast
-
-    c = analyze_contrast(sample_video, 5.0, 45.0)
-    assert set(c) == {"shadow_lift", "midtone", "highlight_roll"}
-    assert all(0.0 <= v <= 1.0 for v in c.values())
-    assert c["shadow_lift"] <= c["midtone"] <= c["highlight_roll"]
 
 
 def test_analyze_white_balance_detects_warm_footage(warm_clip: Path) -> None:
@@ -339,16 +335,6 @@ def test_analyze_white_balance_samples_only_window(monkeypatch) -> None:
     assert all(15.0 <= t <= 35.0 for t in captured["times"])
 
 
-def test_analyze_contrast_samples_only_window(monkeypatch) -> None:
-    import src.render.color_pipeline as cp
-
-    captured: dict = {}
-    _patch_sampling(monkeypatch, captured)
-    cp.analyze_contrast(Path("dummy.mp4"), 20.0, 50.0)
-    assert captured["times"]
-    assert all(20.0 <= t <= 50.0 for t in captured["times"])
-
-
 # =========================================================================== #
 # Group D — build_correction_filter
 # =========================================================================== #
@@ -357,41 +343,46 @@ def test_analyze_contrast_samples_only_window(monkeypatch) -> None:
 def test_build_correction_filter_empty_when_all_none() -> None:
     from src.render.color_pipeline import build_correction_filter
 
-    assert build_correction_filter(None, None, None) == ""
+    assert build_correction_filter(None, None) == ""
 
 
 def test_build_correction_filter_composes_eq_and_colorbalance() -> None:
     from src.render.color_pipeline import build_correction_filter
 
-    s = build_correction_filter(0.1, {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.25}, None)
+    s = build_correction_filter(0.1, {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.25})
     assert "eq=" in s and "brightness=" in s
     assert "colorbalance" in s
     assert "rm=" in s  # midtone band (not rs= shadows)
     assert "rm=-" in s  # red gain < 1 -> negative midtone red shift
     assert s.index("eq") < s.index("colorbalance")
-    assert "curves" not in s
-
-
-def test_build_correction_filter_contrast_curve() -> None:
-    from src.render.color_pipeline import build_correction_filter
-
-    s = build_correction_filter(
-        None, None, {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95}
-    )
-    assert "curves" in s and "all=" in s
-    assert "eq" not in s and "colorbalance" not in s
-
-
-def test_build_correction_filter_full_order_eq_colorbalance_curves() -> None:
-    from src.render.color_pipeline import build_correction_filter
-
-    s = build_correction_filter(
-        0.1,
-        {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.25},
-        {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95},
-    )
-    assert s.index("eq") < s.index("colorbalance") < s.index("curves")
     assert not s.startswith(",") and not s.endswith(",")
+
+
+def test_build_correction_filter_never_emits_curves() -> None:
+    """CP1 core invariant: a pre-LUT correction NEVER contains a contrast curve — that
+    dynamic-range expansion is the white-out; the LUT owns contrast."""
+    from src.render.color_pipeline import build_correction_filter
+
+    s = build_correction_filter(0.1, {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.25})
+    assert "curves" not in s
+    # exposure-only and wb-only forms are equally curve-free
+    assert "curves" not in build_correction_filter(0.1, None)
+    assert "curves" not in build_correction_filter(
+        None, {"red_gain": 0.9, "green_gain": 1.0, "blue_gain": 1.1}
+    )
+
+
+def test_build_correction_filter_wb_shift_is_a_bounded_nudge() -> None:
+    """WB stays a gentle balance: extreme gray-world gains clamp to ``wb_max_shift``,
+    not the full +-1 colorbalance range."""
+    from src.render.color_pipeline import build_correction_filter
+
+    s = build_correction_filter(
+        None, {"red_gain": 5.0, "green_gain": 1.0, "blue_gain": 0.01}, wb_max_shift=0.10
+    )
+    assert "rm=0.1" in s  # +inf gain clamps UP to +max_shift
+    assert "bm=-0.1" in s  # ~0 gain clamps DOWN to -max_shift
+    assert "curves" not in s
 
 
 # =========================================================================== #
@@ -408,76 +399,32 @@ def test_get_correction_disabled_returns_empty(non_video_file: Path, monkeypatch
 
     monkeypatch.setattr(cp, "analyze_exposure", _boom)
     monkeypatch.setattr(cp, "analyze_white_balance", _boom)
-    monkeypatch.setattr(cp, "analyze_contrast", _boom)
 
     out = get_correction_for_mode(non_video_file, 0.0, 10.0, _cp_config(enabled=False))
     assert out == ""
 
 
-def test_get_correction_auto_mode_calls_analyzers(monkeypatch) -> None:
-    import src.render.color_pipeline as cp
+def test_get_correction_auto_mode_produces_eq_and_colorbalance_no_curves(monkeypatch) -> None:
+    captured: dict = {}
+    _patch_sampling(monkeypatch, captured)
+
     from src.render.color_pipeline import get_correction_for_mode
 
-    calls: dict = {}
-    monkeypatch.setattr(cp, "analyze_exposure", lambda *a, **k: calls.setdefault("e", 0) or 0.1)
-    monkeypatch.setattr(
-        cp,
-        "analyze_white_balance",
-        lambda *a, **k: {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.2},
-    )
-    monkeypatch.setattr(
-        cp,
-        "analyze_contrast",
-        lambda *a, **k: {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95},
-    )
-    # record invocation via side flags
-    seen = {"e": False, "w": False, "c": False}
-    monkeypatch.setattr(cp, "analyze_exposure", lambda *a, **k: seen.update(e=True) or 0.1)
-    monkeypatch.setattr(
-        cp,
-        "analyze_white_balance",
-        lambda *a, **k: (
-            seen.update(w=True) or {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.2}
-        ),
-    )
-    monkeypatch.setattr(
-        cp,
-        "analyze_contrast",
-        lambda *a, **k: (
-            seen.update(c=True) or {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95}
-        ),
-    )
-
     out = get_correction_for_mode(Path("x.mp4"), 1.0, 2.0, _cp_config())
-    assert seen == {"e": True, "w": True, "c": True}
-    assert "eq=" in out and "colorbalance" in out and "curves" in out
+    assert "eq=" in out and "colorbalance" in out  # exposure balance + WB nudge
+    assert "curves" not in out  # CP1: the LUT owns contrast
+    assert captured["times"]  # the window was sampled (once) for both components
 
 
 def test_get_correction_passes_window_boundaries(monkeypatch) -> None:
-    import src.render.color_pipeline as cp
+    captured: dict = {}
+    _patch_sampling(monkeypatch, captured)
+
     from src.render.color_pipeline import get_correction_for_mode
 
-    windows: dict = {}
-
-    def rec(name):
-        def _f(video_path, window_start_sec, window_end_sec, sample_frames=30):
-            windows[name] = (window_start_sec, window_end_sec)
-            if name == "e":
-                return 0.1
-            if name == "w":
-                return {"red_gain": 0.9, "green_gain": 1.0, "blue_gain": 1.1}
-            return {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95}
-
-        return _f
-
-    monkeypatch.setattr(cp, "analyze_exposure", rec("e"))
-    monkeypatch.setattr(cp, "analyze_white_balance", rec("w"))
-    monkeypatch.setattr(cp, "analyze_contrast", rec("c"))
-
     get_correction_for_mode(Path("x.mp4"), 12.5, 47.5, _cp_config())
-    assert windows["e"] == (12.5, 47.5)
-    assert windows["w"] == (12.5, 47.5)
-    assert windows["c"] == (12.5, 47.5)
+    assert captured["times"]
+    assert all(12.5 <= t <= 47.5 for t in captured["times"])  # sampled strictly inside the window
 
 
 def test_get_correction_override_skips_analysis(non_video_file: Path, monkeypatch) -> None:
@@ -489,7 +436,6 @@ def test_get_correction_override_skips_analysis(non_video_file: Path, monkeypatc
 
     monkeypatch.setattr(cp, "analyze_exposure", _boom)
     monkeypatch.setattr(cp, "analyze_white_balance", _boom)
-    monkeypatch.setattr(cp, "analyze_contrast", _boom)
     monkeypatch.setattr(cp, "_probe_duration", _boom)
     monkeypatch.setattr(cp, "_grab_frames", _boom)
 
@@ -502,31 +448,17 @@ def test_get_correction_override_skips_analysis(non_video_file: Path, monkeypatc
             exposure_override=0.2,
             wb_mode="override",
             wb_kelvin=4000,
-            contrast_mode="override",
-            contrast_curve="high",
         ),
     )
-    assert "eq=" in out and "colorbalance" in out and "curves" in out
+    assert "eq=" in out and "colorbalance" in out
+    assert "curves" not in out
 
 
 def test_get_correction_partial_override(monkeypatch) -> None:
-    import src.render.color_pipeline as cp
+    captured: dict = {}
+    _patch_sampling(monkeypatch, captured)
+
     from src.render.color_pipeline import get_correction_for_mode
-
-    def _boom_exposure(*a, **k):
-        raise AssertionError("exposure override must not call analyze_exposure")
-
-    monkeypatch.setattr(cp, "analyze_exposure", _boom_exposure)
-    monkeypatch.setattr(
-        cp,
-        "analyze_white_balance",
-        lambda *a, **k: {"red_gain": 0.8, "green_gain": 1.0, "blue_gain": 1.2},
-    )
-    monkeypatch.setattr(
-        cp,
-        "analyze_contrast",
-        lambda *a, **k: {"shadow_lift": 0.05, "midtone": 0.5, "highlight_roll": 0.95},
-    )
 
     out = get_correction_for_mode(
         Path("x.mp4"),
@@ -534,8 +466,9 @@ def test_get_correction_partial_override(monkeypatch) -> None:
         9.0,
         _cp_config(exposure_mode="override", exposure_override=0.3),
     )
-    assert "brightness=0.3" in out  # override value used directly
-    assert "colorbalance" in out and "curves" in out  # auto WB + contrast applied
+    assert "brightness=0.3" in out  # exposure override used directly (not measured)
+    assert "colorbalance" in out  # WB still auto-balanced from the sampled frames
+    assert "curves" not in out  # no contrast stage
 
 
 def test_get_correction_fails_loud_on_unreadable_source(non_video_file: Path) -> None:
@@ -543,6 +476,77 @@ def test_get_correction_fails_loud_on_unreadable_source(non_video_file: Path) ->
 
     with pytest.raises((ValueError, RuntimeError)):
         get_correction_for_mode(non_video_file, 0.0, 5.0, _cp_config())
+
+
+# =========================================================================== #
+# Group E2 — resolve_correction: structured result for the audit report
+# =========================================================================== #
+
+
+def test_get_correction_for_mode_is_the_filter_string_of_resolve_correction(monkeypatch) -> None:
+    """``get_correction_for_mode`` is a thin wrapper over ``resolve_correction`` (the cut
+    path keeps calling it and gets the same filter string)."""
+    captured: dict = {}
+    _patch_sampling(monkeypatch, captured)
+
+    from src.render.color_pipeline import get_correction_for_mode, resolve_correction
+
+    cfg = _cp_config()
+    result = resolve_correction(Path("x.mp4"), 1.0, 2.0, cfg)
+    filt = get_correction_for_mode(Path("x.mp4"), 1.0, 2.0, cfg)
+    assert filt == result.filter_string
+
+
+def test_resolve_correction_returns_structured_values(monkeypatch) -> None:
+    captured: dict = {}
+    _patch_sampling(monkeypatch, captured)  # solid mid-gray (128) frames
+
+    from src.render.color_pipeline import resolve_correction
+
+    r = resolve_correction(Path("x.mp4"), 1.0, 2.0, _cp_config())
+    assert r.enabled is True
+    assert isinstance(r.mean_luma, float) and 0.0 <= r.mean_luma <= 1.0
+    assert r.channel_means_rgb is not None and len(r.channel_means_rgb) == 3
+    assert r.target_midgray == pytest.approx(0.41)  # default log mid-gray
+    assert isinstance(r.exposure_offset, float)
+    assert set(r.wb_shifts) == {"rm", "gm", "bm"}
+    assert "eq=" in r.filter_string and "colorbalance" in r.filter_string
+    assert "curves" not in r.filter_string
+    assert r.contrast_normalization is False  # the explicit audit flag: the LUT owns contrast
+
+
+def test_resolve_correction_samples_the_window_exactly_once(monkeypatch) -> None:
+    """One sampling pass feeds BOTH exposure and WB (no double-decode of 4K frames)."""
+    import numpy as np
+
+    import src.render.color_pipeline as cp
+
+    calls = {"n": 0}
+
+    def counting_grab(video_path, times):
+        calls["n"] += 1
+        return [np.full((4, 4, 3), 128, dtype=np.uint8) for _ in times]
+
+    monkeypatch.setattr(cp, "_probe_duration", lambda _p: 60.0)
+    monkeypatch.setattr(cp, "_grab_frames", counting_grab)
+
+    cp.resolve_correction(Path("x.mp4"), 1.0, 2.0, _cp_config())
+    assert calls["n"] == 1  # exposure + WB share a single sampling pass
+
+
+def test_resolve_correction_disabled_returns_empty_unsampled(monkeypatch) -> None:
+    import src.render.color_pipeline as cp
+
+    def _boom(*a, **k):
+        raise AssertionError("disabled correction must not sample")
+
+    monkeypatch.setattr(cp, "_probe_duration", _boom)
+    monkeypatch.setattr(cp, "_grab_frames", _boom)
+
+    r = cp.resolve_correction(Path("x.mp4"), 0.0, 10.0, _cp_config(enabled=False))
+    assert r.enabled is False
+    assert r.filter_string == ""
+    assert r.contrast_normalization is False
 
 
 # =========================================================================== #
@@ -557,13 +561,23 @@ def test_config_technical_correction_defaults_disabled() -> None:
     assert cfg.technical_correction.enabled is False
     assert cfg.technical_correction.exposure.mode == "auto"
     assert cfg.technical_correction.white_balance.mode == "auto"
-    assert cfg.technical_correction.contrast.mode == "auto"
+    # CP1 balance knobs: log mid-gray target + gentle bounds (defaults), no contrast block
+    assert cfg.technical_correction.exposure.target_midgray == pytest.approx(0.41)
+    assert cfg.technical_correction.exposure.max_shift == pytest.approx(0.10)
+    assert cfg.technical_correction.white_balance.max_shift == pytest.approx(0.10)
+    assert not hasattr(cfg.technical_correction, "contrast")
+
+
+def test_config_contrast_settings_removed() -> None:
+    import src.config as config
+
+    assert not hasattr(config, "ContrastSettings")  # CP1: contrast no longer a pre-LUT stage
 
 
 def test_config_override_value_validation() -> None:
     from pydantic import ValidationError
 
-    from src.config import ContrastSettings, ExposureSettings, WhiteBalanceSettings
+    from src.config import ExposureSettings, WhiteBalanceSettings
 
     with pytest.raises(ValidationError):
         ExposureSettings(mode="override", override_value=2.0)
@@ -573,12 +587,9 @@ def test_config_override_value_validation() -> None:
         WhiteBalanceSettings(mode="override", override_kelvin=1500)
     with pytest.raises(ValidationError):
         WhiteBalanceSettings(mode="override", override_kelvin=12000)
-    with pytest.raises(ValidationError):
-        ContrastSettings(mode="override", override_curve="ultra")
     # valid values accepted
     assert ExposureSettings(mode="override", override_value=0.5).override_value == 0.5
     assert WhiteBalanceSettings(mode="override", override_kelvin=4000).override_kelvin == 4000
-    assert ContrastSettings(mode="override", override_curve="medium").override_curve == "medium"
 
 
 def test_config_rejects_unknown_color_pipeline_key() -> None:

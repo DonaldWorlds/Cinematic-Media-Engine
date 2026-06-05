@@ -575,8 +575,10 @@ Current cinematic_longform applies LUT only (creative grade stage). Industry-sta
 3. Engine: render to output format
 4. Descript: polish (color adjustments as final tweaks, not foundational fixes)
 
-### Critical ordering rule
-Technical correction MUST happen before LUT because LUTs assume normalized input. Sony Cool 709 LUT expects properly-exposed S-Log3 footage to map correctly to Rec.709. Bad exposure or wrong WB feeding into the LUT produces unpredictable results.
+### Critical ordering rule (CORRECTED in CP1 — 2026-06-04)
+**Original (WRONG) premise:** "technical correction MUST normalize before the LUT because LUTs assume normalized input." This caused an all-WHITE grade. The Sony Cool 709 LUT is an **S-Log3/S-Gamut3.Cine→Rec.709 conversion** LUT — it OWNS dynamic-range expansion and expects *untouched log* input. The Phase-10 pre-LUT stage did a full display normalization in log space (auto-exposure to 0.5 mid-gray + a `p5→0 / p95→1` contrast-curve stretch); the LUT then expanded that already-stretched signal again → clipped to white.
+
+**CP1 corrected principle:** a pre-LUT correction BALANCES, it does not normalize. Pre-LUT stage = exposure-balance (nudge toward the S-Log3 log mid-gray `0.41`, clamped to a gentle `±max_shift`) + white-balance nudge (gray-world, clamped) ONLY. **No contrast curve** (removed — the LUT owns contrast). Correct→LUT order is unchanged; only the math changed. Any contrast trim belongs AFTER the LUT, separately. Every `cme grade` run now writes an auditable `<output>.report.json` recording the measured stats, the balance applied, and `contrast_normalization: false`.
 
 Descript color adjustments come AFTER all engine color work because Descript polish is for refinement, not foundational correction.
 
@@ -681,6 +683,12 @@ Built via the CP1→CP3 checkpointed TDD contract (43 RED-first → 6-batch diff
 ## Last Updated
 
 *(Update this date whenever you edit this file.)*
+
+**Date:** 2026-06-04
+**By:** CP1 — pre-LUT correction BALANCE (not normalize) + auditable grade report
+**Changes:** Fixed the all-WHITE `cme grade` output. Root cause: the Phase-10 pre-LUT stage NORMALIZED in log space (auto-exposure to display mid-gray `0.5` + a `curves=all='p5/0 … p95/1'` contrast stretch) before an **S-Log3→Rec.709 conversion** LUT that itself expands dynamic range — double expansion → clipped to white. CP1 makes the pre-LUT stage a **balance, not a normalize**: exposure nudge toward the S-Log3 log mid-gray (`target_midgray=0.41`, clamped to `max_shift=0.10`) + gray-world WB nudge (clamped to `max_shift`); **contrast curve removed entirely** (LUT owns contrast). `color_pipeline.py`: dropped `analyze_contrast`/`contrast_curve_points`/`_CONTRAST_PRESETS`; `exposure_adjustment(mean,target,max_shift)`; bounded `_gain_to_midtone_shift`; new `resolve_correction → CorrectionResult` (single-sample for exposure+WB, no float64 frame-concat — also cuts the 4K memory/decode cost); `get_correction_for_mode` is now a thin wrapper. `config.py`: removed `ContrastSettings`; `ExposureSettings` += `target_midgray`+`max_shift`, `WhiteBalanceSettings` += `max_shift`. New `src/render/grade_report.py` → every `cme grade` writes `<output>.report.json` (input probe + measured stats, correction with explicit `contrast_normalization:false`, LUT+order, encoder+actual quality params, output probe) + INFO log; wired into `run_grade`. Shared math also corrects the cinematic windowed-cut path (same function); cut-path code untouched. TDD: Batch1 (color_pipeline+config) 15 RED→GREEN, Batch2 (report) 17 RED→GREEN. See "Critical ordering rule (CORRECTED in CP1)" above. NOTE: the separate 8GB-M1 watchdog kernel-panic crashes (memory exhaustion on the full 4K pipeline, NOT disk) are a known issue, not addressed here.
+
+---
 
 **Date:** 2026-06-03
 **By:** Phase 10 (Session 16) — Professional Color Pipeline (Stage-1 technical correction)

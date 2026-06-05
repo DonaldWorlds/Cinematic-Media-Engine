@@ -1807,6 +1807,14 @@ def _grade_cmd(**kw):
     return build_grade_command(source, output, **kw)
 
 
+def _fake_correction(filter_string: str = ""):
+    """Lightweight CorrectionResult stand-in — run_grade reads only ``.filter_string``
+    (the report emitter is patched out in these unit tests, so other fields are unused)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(filter_string=filter_string)
+
+
 def test_build_grade_command_has_lut3d_no_seek_no_cut() -> None:
     args = _grade_cmd()
     assert "lut3d=look.cube:interp=tetrahedral" in args[args.index("-vf") + 1]
@@ -1881,9 +1889,8 @@ def test_run_grade_resolves_mode_color_grade(tmp_path: Path, monkeypatch) -> Non
 
     monkeypatch.setattr(lf, "resolve_lut_grade", fake_resolve)
     monkeypatch.setattr(lf, "run_ffmpeg", lambda *a, **k: None)
-    monkeypatch.setattr(
-        lf, "get_correction_for_mode", lambda *a, **k: ""
-    )  # isolate: not testing correction
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     run_grade(Path("in.mp4"), tmp_path / "out.mp4", load_config(), _cinematic_mode_with_lut())
     assert captured["color_grade"].get("lut_path") == str(
@@ -1916,12 +1923,13 @@ def test_run_grade_corrects_by_default_over_full_file(tmp_path: Path, monkeypatc
 
     window: dict = {}
 
-    def fake_get(video_path, window_start_sec, window_end_sec, cp_cfg):
+    def fake_resolve(video_path, window_start_sec, window_end_sec, cp_cfg):
         window["start"] = window_start_sec
         window["end"] = window_end_sec
-        return "eq=brightness=0.0"
+        return _fake_correction("eq=brightness=0.0")
 
-    monkeypatch.setattr(lf, "get_correction_for_mode", fake_get)
+    monkeypatch.setattr(lf, "resolve_correction", fake_resolve)
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
     captured: dict = {}
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: captured.__setitem__("cmd", cmd))
 
@@ -1940,9 +1948,10 @@ def test_run_grade_no_correct_flag_omits_correction(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(
         lf,
-        "get_correction_for_mode",
+        "resolve_correction",
         lambda *a, **k: pytest.fail("--no-correct must skip correction"),
     )
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
     captured: dict = {}
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: captured.__setitem__("cmd", cmd))
 
@@ -1965,7 +1974,8 @@ def test_run_grade_quality_flows_per_branch(tmp_path: Path, monkeypatch) -> None
 
     cmds: list = []
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
-    monkeypatch.setattr(lf, "get_correction_for_mode", lambda *a, **k: "")
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     # hardware (default): --quality maps to videotoolbox -q:v (no -crf)
     run_grade(
@@ -1999,7 +2009,8 @@ def test_run_grade_bitrate_wins_on_both_branches(tmp_path: Path, monkeypatch) ->
 
     cmds: list = []
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
-    monkeypatch.setattr(lf, "get_correction_for_mode", lambda *a, **k: "")
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     run_grade(
         Path("in.mp4"),
@@ -2028,9 +2039,8 @@ def test_run_grade_scale_to_mode_downscales(tmp_path: Path, monkeypatch) -> None
 
     cmds: list = []
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
-    monkeypatch.setattr(
-        lf, "get_correction_for_mode", lambda *a, **k: ""
-    )  # isolate: not testing correction
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
     run_grade(
         Path("in.mp4"),
         tmp_path / "out.mp4",
@@ -2129,7 +2139,8 @@ def test_run_grade_hardware_by_default(tmp_path: Path, monkeypatch) -> None:
 
     cmds: list = []
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
-    monkeypatch.setattr(lf, "get_correction_for_mode", lambda *a, **k: "")
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     run_grade(Path("in.mp4"), tmp_path / "out.mp4", load_config(), _cinematic_mode_with_lut())
     cmd = cmds[0]
@@ -2144,7 +2155,8 @@ def test_run_grade_software_flag_uses_libx264_crf(tmp_path: Path, monkeypatch) -
 
     cmds: list = []
     monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
-    monkeypatch.setattr(lf, "get_correction_for_mode", lambda *a, **k: "")
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     run_grade(
         Path("in.mp4"),
@@ -2171,7 +2183,8 @@ def test_run_grade_no_silent_fallback_fails_loud(tmp_path: Path, monkeypatch) ->
         raise FFmpegError("hardware encode failed")
 
     monkeypatch.setattr(lf, "run_ffmpeg", boom)
-    monkeypatch.setattr(lf, "get_correction_for_mode", lambda *a, **k: "")
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction())
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
 
     with pytest.raises(FFmpegError):
         run_grade(Path("in.mp4"), tmp_path / "out.mp4", load_config(), _cinematic_mode_with_lut())

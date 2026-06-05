@@ -44,9 +44,9 @@ color_grade:
 color_pipeline:
   technical_correction:
     enabled: true
-    # exposure: { mode: override, override_value: 0.0 }
-    # white_balance: { mode: override, override_kelvin: 5600 }
-    # contrast: { mode: override, override_curve: medium }
+    # exposure: { mode: override, override_value: 0.0, target_midgray: 0.41, max_shift: 0.10 }
+    # white_balance: { mode: override, override_kelvin: 5600, max_shift: 0.10 }
+    # CP1: no contrast stage here — the LUT owns dynamic-range expansion.
 
 output:
   base_dir: src/output/longform/cinematic

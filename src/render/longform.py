@@ -33,7 +33,8 @@ from ..utils.ffmpeg import FFmpegError, run_ffmpeg
 from ..utils.fileio import ensure_dir, read_json, write_json
 from ..utils.logging import get_logger
 from .backend import RenderFormat
-from .color_pipeline import get_correction_for_mode
+from .color_pipeline import get_correction_for_mode, resolve_correction
+from .grade_report import emit_grade_report
 from .thumbnails import extract_thumbnails, select_thumbnail_frames
 
 __all__ = [
@@ -113,8 +114,8 @@ def build_longform_command(spec: LongformClipSpec, *, encoder: str) -> list[str]
     watermark overlay — Descript handles all downstream polish. When ``spec.lut`` is
     set, a single ``lut3d`` grade is prepended BEFORE scale, so the colour grade is
     applied at source resolution and then downsampled. When ``spec.correction`` is set,
-    Phase-10 technical-correction filters are prepended BEFORE the LUT (LUTs assume
-    normalized input — KNOWLEDGE.md Phase 10 ordering rule).
+    the CP1 pre-LUT BALANCE (eq + colorbalance, no contrast curve) is prepended BEFORE the
+    LUT so the LUT receives a balanced log signal — the LUT owns contrast (KNOWLEDGE.md CP1).
     """
     duration = spec.end_sec - spec.start_sec
     vf = f"scale={spec.fmt.width}:{spec.fmt.height}"
@@ -415,9 +416,11 @@ def run_grade(
 ) -> Path:
     """Apply ``mode``'s LUT grade to a FULL input file — no selection, no cut.
 
-    Correction (Phase-10 eq/colorbalance/curves) is ON by default, auto-detected over the
-    input's own ``[0, duration]`` (``get_correction_for_mode`` clamps the sentinel end down to
-    the real readable duration). Native resolution unless ``scale_to_mode``. Encodes on the M1
+    Pre-LUT BALANCE correction (CP1: eq + colorbalance only — NO contrast curve; the LUT owns
+    contrast) is ON by default, auto-detected over the input's own ``[0, duration]`` via
+    ``resolve_correction`` (which clamps the sentinel end to the real readable duration). Every
+    run writes an auditable ``<output>.report.json`` sidecar. Native resolution unless
+    ``scale_to_mode``. Encodes on the M1
     media engine (``h264_videotoolbox``, ``-q:v`` constant quality) by default — software 4K
     libx264 exhausts an 8GB M1; ``hardware=False`` switches to libx264 CRF. ``bitrate`` forces
     ABR. ONE ``run_ffmpeg`` call with NO fallback: a hardware error fails loud (no libx264 retry
@@ -440,11 +443,12 @@ def run_grade(
         audio_codec=rendering.get("audio_codec", "aac"),
         bitrate=rendering.get("bitrate_target"),
     )
-    correction = (
-        get_correction_for_mode(source, 0.0, GRADE_FULL_FILE_SEC, mode.color_pipeline)
+    correction_result = (
+        resolve_correction(source, 0.0, GRADE_FULL_FILE_SEC, mode.color_pipeline)
         if correct
-        else ""
+        else None
     )
+    correction = correction_result.filter_string if correction_result else ""
     encoder = "h264_videotoolbox" if hardware else "libx264"
     cmd = build_grade_command(
         source,
@@ -459,6 +463,15 @@ def run_grade(
     )
     ensure_dir(output.parent)
     run_ffmpeg(cmd)
+    emit_grade_report(
+        source=source,
+        output=output,
+        correction=correction_result,
+        lut_path=lut.path,
+        lut_interp=lut.interp,
+        encoder=encoder,
+        cmd=cmd,
+    )
     _log.info(
         "grade: %s -> %s (encoder=%s, correct=%s, scale_to_mode=%s)",
         source,

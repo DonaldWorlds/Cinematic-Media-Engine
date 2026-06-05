@@ -298,59 +298,70 @@ class DescriptSettings(BaseModel):
 # grade stays in the existing top-level ``color_grade`` block (unchanged).
 # --------------------------------------------------------------------------- #
 
-_CONTRAST_CURVES = ("soft", "medium", "high")
-
 
 class ExposureSettings(BaseModel):
+    """Pre-LUT exposure BALANCE (CP1): nudge mean luma toward the log mid-gray ``target_midgray``,
+    clamped to ``max_shift``. NOT a display normalization — the LUT owns dynamic range."""
+
     model_config = ConfigDict(extra="forbid")
     mode: Literal["auto", "override"] = "auto"
     override_value: float | None = None  # only used when mode == "override"
+    target_midgray: float = 0.41  # S-Log3 18% gray (~code 420/1023); balance auto-exposure to here
+    max_shift: float = 0.10  # clamp the brightness nudge to a gentle range (balance, not slam)
 
     @field_validator("override_value")
     @classmethod
-    def _in_range(cls, value: float | None) -> float | None:
+    def _override_in_range(cls, value: float | None) -> float | None:
         if value is not None and not (-1.0 <= value <= 1.0):
             raise ValueError(f"exposure override_value must be in [-1.0, 1.0], got {value}")
         return value
 
+    @field_validator("target_midgray")
+    @classmethod
+    def _target_in_range(cls, value: float) -> float:
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"exposure target_midgray must be in [0.0, 1.0], got {value}")
+        return value
+
+    @field_validator("max_shift")
+    @classmethod
+    def _max_shift_in_range(cls, value: float) -> float:
+        if not (0.0 < value <= 1.0):
+            raise ValueError(f"exposure max_shift must be in (0.0, 1.0], got {value}")
+        return value
+
 
 class WhiteBalanceSettings(BaseModel):
+    """Pre-LUT white-balance BALANCE (CP1): gentle gray-world nudge bounded by ``max_shift``."""
+
     model_config = ConfigDict(extra="forbid")
     mode: Literal["auto", "override"] = "auto"
     override_kelvin: int | None = None  # only used when mode == "override"
+    max_shift: float = 0.10  # clamp each colorbalance midtone shift to a gentle nudge
 
     @field_validator("override_kelvin")
     @classmethod
-    def _in_range(cls, value: int | None) -> int | None:
+    def _override_in_range(cls, value: int | None) -> int | None:
         if value is not None and not (2000 <= value <= 10000):
             raise ValueError(f"white_balance override_kelvin must be in [2000, 10000], got {value}")
         return value
 
-
-class ContrastSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    mode: Literal["auto", "override"] = "auto"
-    override_curve: str | None = None  # "soft" | "medium" | "high" | None
-
-    @field_validator("override_curve")
+    @field_validator("max_shift")
     @classmethod
-    def _known_curve(cls, value: str | None) -> str | None:
-        if value is not None and value not in _CONTRAST_CURVES:
-            raise ValueError(
-                f"contrast override_curve must be one of {list(_CONTRAST_CURVES)} or null, "
-                f"got {value!r}"
-            )
+    def _max_shift_in_range(cls, value: float) -> float:
+        if not (0.0 < value <= 1.0):
+            raise ValueError(f"white_balance max_shift must be in (0.0, 1.0], got {value}")
         return value
 
 
 class TechnicalCorrectionSettings(BaseModel):
-    """Stage-1 correction toggle + per-component auto/override settings (Phase 10)."""
+    """Stage-1 pre-LUT correction (CP1): exposure + white-balance BALANCE only. Contrast is NOT
+    corrected here — the LUT owns dynamic-range expansion (KNOWLEDGE.md CP1)."""
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False  # default off; cinematic_longform.yaml turns it on
     exposure: ExposureSettings = Field(default_factory=ExposureSettings)
     white_balance: WhiteBalanceSettings = Field(default_factory=WhiteBalanceSettings)
-    contrast: ContrastSettings = Field(default_factory=ContrastSettings)
 
 
 class ColorPipelineConfig(BaseModel):
