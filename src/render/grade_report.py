@@ -70,6 +70,7 @@ class LutInfo(BaseModel):
     path: str
     interp: str
     applied_after_correction: bool = True
+    source: str = "mode"  # which cube ran: "mode" (config) | "override" (--lut)
 
 
 class EncoderInfo(BaseModel):
@@ -140,6 +141,7 @@ def build_grade_report(
     lut_interp: str,
     encoder: str,
     quality_params: dict[str, str],
+    lut_source: str = "mode",
 ) -> GradeReport:
     """Assemble a :class:`GradeReport` from probes + the resolved correction (pure, no I/O)."""
     sv = _video_stream(source_probe)
@@ -176,7 +178,12 @@ def build_grade_report(
     return GradeReport(
         input=input_info,
         correction=correction_info,
-        lut=LutInfo(path=str(lut_path), interp=lut_interp, applied_after_correction=True),
+        lut=LutInfo(
+            path=str(lut_path),
+            interp=lut_interp,
+            applied_after_correction=True,
+            source=lut_source,
+        ),
         encoder=EncoderInfo(name=encoder, quality=dict(quality_params)),
         output=output_info,
     )
@@ -205,6 +212,7 @@ def emit_grade_report(
     lut_interp: str,
     encoder: str,
     cmd: list[str],
+    lut_source: str = "mode",
 ) -> Path | None:
     """Probe input/output, assemble, write the sidecar, and log an INFO summary.
 
@@ -221,6 +229,7 @@ def emit_grade_report(
         lut_interp=lut_interp,
         encoder=encoder,
         quality_params=_encoder_quality_from_args(cmd),
+        lut_source=lut_source,
     )
     path = write_grade_report(report, output)
     _log.info(

@@ -527,3 +527,26 @@ def test_grade_command_prores_rejects_h264_knobs(tmp_path: Path, monkeypatch) ->
     assert result.exit_code != 0  # rejected before any work
     assert called["n"] == 0  # run_grade / the encode never reached
     assert "prores" in result.output.lower() or "codec" in result.output.lower()
+
+
+def test_grade_command_lut_override_flows_through(tmp_path: Path, monkeypatch) -> None:
+    """--lut PATH is forwarded to run_grade as lut_override (run_grade does the validation)."""
+    from src import cli
+
+    src = tmp_path / "in.mp4"
+    src.write_bytes(b"x")
+    cube = tmp_path / "look.cube"
+    cube.write_text("LUT_3D_SIZE 2\n")  # CLI only forwards the path; validity is run_grade's job
+    captured: dict = {}
+    monkeypatch.setattr(
+        cli,
+        "run_grade",
+        lambda source, output, config, mode, **kw: captured.update(kw=kw) or output,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        cli.app, ["grade", str(src), str(tmp_path / "o.mov"), "--lut", str(cube)]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["kw"]["lut_override"] == cube

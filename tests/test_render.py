@@ -2362,3 +2362,106 @@ def test_run_grade_prores_smoke_outputs_real_422_10bit(tmp_path: Path) -> None:
     video = next(s for s in probe["streams"] if s["codec_type"] == "video")
     assert video["codec_name"] == "prores"
     assert video["pix_fmt"] == "yuv422p10le"  # real 10-bit 4:2:2 preserved through the encode
+
+
+# --------------------------------------------------------------------------- #
+# CP — --lut override + .cube validity (fail-loud). vf/correction/encoder untouched.
+# --------------------------------------------------------------------------- #
+
+
+def _write_min_cube(path: Path, size: int = 2) -> Path:
+    """A minimal valid identity ``.cube`` (size^3 entries) for override tests."""
+    denom = size - 1
+    lines = [f"LUT_3D_SIZE {size}"]
+    for b in range(size):
+        for g in range(size):
+            for r in range(size):
+                lines.append(f"{r / denom:.6f} {g / denom:.6f} {b / denom:.6f}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _grade_lf(monkeypatch, cmds=None):
+    """Patch the run_grade seams; if ``cmds`` is None, run_ffmpeg must NOT be called."""
+    import src.render.longform as lf
+
+    if cmds is not None:
+        monkeypatch.setattr(lf, "run_ffmpeg", lambda cmd, *a, **k: cmds.append(cmd))
+    else:
+        monkeypatch.setattr(
+            lf, "run_ffmpeg", lambda *a, **k: pytest.fail("must not encode with an invalid LUT")
+        )
+    monkeypatch.setattr(lf, "resolve_correction", lambda *a, **k: _fake_correction(""))
+    monkeypatch.setattr(lf, "emit_grade_report", lambda *a, **k: None)
+
+
+def test_run_grade_lut_override_points_lut3d_at_given_cube(tmp_path: Path, monkeypatch) -> None:
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    cmds: list = []
+    _grade_lf(monkeypatch, cmds)
+    override = _write_min_cube(tmp_path / "override.cube")
+    run_grade(
+        Path("in.mp4"),
+        tmp_path / "out.mov",
+        load_config(),
+        _cinematic_mode_with_lut(),
+        lut_override=override,
+    )
+    vf = cmds[0][cmds[0].index("-vf") + 1]
+    assert f"lut3d={override}" in vf  # the override cube is graded with...
+    assert "identity.cube" not in vf  # ...not the mode's LUT
+
+
+def test_run_grade_no_lut_override_uses_mode_lut(tmp_path: Path, monkeypatch) -> None:
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    cmds: list = []
+    _grade_lf(monkeypatch, cmds)
+    run_grade(Path("in.mp4"), tmp_path / "out.mov", load_config(), _cinematic_mode_with_lut())
+    vf = cmds[0][cmds[0].index("-vf") + 1]
+    assert "identity.cube" in vf  # mode's LUT unchanged when no --lut given
+
+
+def test_run_grade_lut_override_missing_fails_loud(tmp_path: Path, monkeypatch) -> None:
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    _grade_lf(monkeypatch)  # run_ffmpeg must NOT be called
+    with pytest.raises(ValueError, match=r"nope\.cube"):
+        run_grade(
+            Path("in.mp4"),
+            tmp_path / "out.mov",
+            load_config(),
+            _cinematic_mode_with_lut(),
+            lut_override=tmp_path / "nope.cube",
+        )
+
+
+def test_run_grade_lut_override_malformed_fails_loud(tmp_path: Path, monkeypatch) -> None:
+    from src.config import load_config
+    from src.render.longform import run_grade
+
+    _grade_lf(monkeypatch)
+    bad = tmp_path / "bad.cube"
+    bad.write_text("this is not a cube file\n")  # exists + readable, but no LUT_3D_SIZE / no grid
+    with pytest.raises(ValueError):
+        run_grade(
+            Path("in.mp4"),
+            tmp_path / "out.mov",
+            load_config(),
+            _cinematic_mode_with_lut(),
+            lut_override=bad,
+        )
+
+
+def test_resolve_lut_grade_rejects_malformed_cube(tmp_path: Path) -> None:
+    # the .cube hardening applies to the MODE LUT path too, not only --lut
+    from src.render.longform import resolve_lut_grade
+
+    bad = tmp_path / "bad.cube"
+    bad.write_text("not a cube\n")
+    with pytest.raises(ValueError):
+        resolve_lut_grade({"enabled": True, "lut_path": str(bad)})

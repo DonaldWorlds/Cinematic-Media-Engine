@@ -1,6 +1,6 @@
 # Cinematic Media Engine
 
-Multi-style media intelligence for **kkthedon** — one engine, three content modes
+Multi-style media intelligence for **Donald Witherspoon** — one engine, three content modes
 (`standard_longform`, `cinematic_longform`, `shortform`). It ingests a video and
 runs an analysis layer that emits per-signal JSON; later phases turn that into
 ranked moments, rendered clips, and thumbnails.

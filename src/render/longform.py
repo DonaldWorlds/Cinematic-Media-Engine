@@ -89,12 +89,52 @@ class LongformClipSpec(BaseModel):
     correction: str = ""  # Phase 10: technical-correction filters, prepended BEFORE lut3d
 
 
+def _validate_cube(path: Path) -> None:
+    """Fail loud unless ``path`` is a readable, parseable 3D ``.cube`` (LUT_3D_SIZE + N^3 grid).
+
+    Content-based, not extension-based: catches an empty / truncated / non-LUT file or a 1D
+    LUT before any ffmpeg work. Applies to BOTH the mode LUT and a ``--lut`` override.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"LUT is not a readable .cube: {path} ({exc})") from exc
+    size: int | None = None
+    data_rows = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        upper = line.upper()
+        if upper.startswith("LUT_3D_SIZE"):
+            try:
+                size = int(line.split()[-1])
+            except (ValueError, IndexError) as exc:
+                raise ValueError(f"LUT has an invalid LUT_3D_SIZE: {path}") from exc
+            continue
+        if upper.startswith("LUT_1D_SIZE"):
+            raise ValueError(f"LUT is a 1D LUT, not a 3D .cube: {path}")
+        parts = line.split()
+        if len(parts) == 3:
+            try:
+                float(parts[0]), float(parts[1]), float(parts[2])
+            except ValueError:
+                continue  # a 3-token directive, not a data row
+            data_rows += 1
+    if size is None:
+        raise ValueError(f"LUT is not a valid .cube (no LUT_3D_SIZE): {path}")
+    if data_rows != size**3:
+        raise ValueError(
+            f"LUT {path} declares LUT_3D_SIZE {size} ({size**3} entries) but has {data_rows}"
+        )
+
+
 def resolve_lut_grade(color_grade: Mapping[str, Any]) -> LutGrade | None:
     """Build a ``LutGrade`` from a mode's ``color_grade`` config, or None if disabled.
 
-    Resolves ``lut_path`` against ``PROJECT_ROOT`` (like the output base) and checks
-    existence at call time — render entry, not config load — so a deleted/missing LUT
-    fails loudly with its resolved path before any ffmpeg work starts.
+    Resolves ``lut_path`` against ``PROJECT_ROOT`` (like the output base) and validates it as a
+    real ``.cube`` at call time — render entry, not config load — so a deleted/missing/malformed
+    LUT fails loudly with its resolved path before any ffmpeg work starts.
     """
     if not color_grade.get("enabled"):
         return None
@@ -104,6 +144,7 @@ def resolve_lut_grade(color_grade: Mapping[str, Any]) -> LutGrade | None:
     resolved = (PROJECT_ROOT / str(lut_path)).resolve()
     if not resolved.is_file():
         raise ValueError(f"color_grade.lut_path file not found: {resolved}")
+    _validate_cube(resolved)
     return LutGrade(path=resolved, interp=color_grade.get("interp", "tetrahedral"))
 
 
@@ -426,6 +467,7 @@ def run_grade(
     quality: int | None = None,
     bitrate: str | None = None,
     hardware: bool | None = None,
+    lut_override: Path | None = None,
 ) -> Path:
     """Apply ``mode``'s LUT grade to a FULL input file — no selection, no cut.
 
@@ -441,8 +483,10 @@ def run_grade(
     INVALID with it and raise ``ValueError`` (use ``codec="h264"`` for quality control). With
     ``codec="h264"`` behaviour is unchanged: ``hardware`` (default True) -> videotoolbox ``-q:v``
     / libx264 ``-crf``, ``quality`` (default 18) and ``bitrate`` as before, ONE ``run_ffmpeg`` call
-    with NO fallback. Fails loud if the mode has no LUT or the source can't be read. No workspace /
-    no cache — each call is independent (per-file).
+    with NO fallback. ``lut_override`` (the ``--lut`` flag) replaces the mode LUT with the given
+    ``.cube``; the resolved LUT — override or mode — is validated as a real ``.cube`` (fail loud,
+    no silent fallback). Fails loud if the mode has no LUT or the source can't be read. No
+    workspace / no cache — each call is independent (per-file).
     """
     if codec == "prores":
         rejected = [
@@ -461,11 +505,22 @@ def run_grade(
                 f"(profile-fixed 422 HQ master); use --codec h264 for quality control."
             )
     md = mode.model_dump()
-    lut = resolve_lut_grade(md.get("color_grade", {}))
-    if lut is None:
-        raise ValueError(
-            f"mode {mode.mode_name!r} has no color_grade/LUT to apply (use cinematic_longform)"
-        )
+    if lut_override is not None:
+        resolved = lut_override.resolve()
+        if not resolved.is_file():
+            raise ValueError(f"--lut file not found: {resolved}")
+        _validate_cube(resolved)
+        interp = md.get("color_grade", {}).get("interp", "tetrahedral")
+        lut = LutGrade(path=resolved, interp=interp)
+        lut_source = "override"
+    else:
+        resolved_lut = resolve_lut_grade(md.get("color_grade", {}))
+        if resolved_lut is None:
+            raise ValueError(
+                f"mode {mode.mode_name!r} has no color_grade/LUT to apply (use cinematic_longform)"
+            )
+        lut = resolved_lut
+        lut_source = "mode"
     rendering = md.get("rendering", {})
     resolution = rendering.get("resolution", {})
     fmt = RenderFormat(
@@ -519,6 +574,7 @@ def run_grade(
         lut_interp=lut.interp,
         encoder=encoder,
         cmd=cmd,
+        lut_source=lut_source,
     )
     _log.info(
         "grade: %s -> %s (codec=%s, encoder=%s, correct=%s, scale_to_mode=%s)",

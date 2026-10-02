@@ -360,6 +360,11 @@ def grade(
     bitrate: str | None = typer.Option(
         None, "--bitrate", help="h264 only: force a fixed bitrate (e.g. 50M)."
     ),
+    lut: Path | None = typer.Option(
+        None,
+        "--lut",
+        help="Override the mode's LUT with this .cube (validated; fails loud if missing/malformed).",
+    ),
 ) -> None:
     """Apply a mode's LUT grade to a FULL input file — no selection, no cut."""
     if codec not in ("prores", "h264"):
@@ -393,6 +398,7 @@ def grade(
             correct=correct,
             scale_to_mode=not keep_resolution,
             codec="prores",
+            lut_override=lut,
         )
     else:
         out = run_grade(
@@ -406,6 +412,7 @@ def grade(
             quality=quality,
             bitrate=bitrate,
             hardware=hardware,
+            lut_override=lut,
         )
     console.print(f"[bold]Graded[/bold] {source} -> {out}")
 

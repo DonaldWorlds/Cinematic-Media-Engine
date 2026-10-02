@@ -169,6 +169,26 @@ def test_build_grade_report_no_correction_marks_disabled() -> None:
     assert r.input.mean_luma is None  # not measured when correction is off
 
 
+def test_build_grade_report_records_lut_source() -> None:
+    """CP: the report records which cube ran — 'mode' vs '--lut override'."""
+    from src.render.grade_report import build_grade_report
+
+    r = build_grade_report(
+        source=Path("in.MP4"),
+        output=Path("out.mov"),
+        source_probe=_source_probe(),
+        output_probe=_output_probe(),
+        correction=_correction(),
+        lut_path=Path("/abs/override.cube"),
+        lut_interp="tetrahedral",
+        lut_source="override",
+        encoder="prores_ks",
+        quality_params={"profile:v": "3"},
+    )
+    assert r.lut.source == "override"
+    assert r.lut.path.endswith("override.cube")
+
+
 def test_write_grade_report_writes_sidecar(tmp_path: Path) -> None:
     from src.render.grade_report import build_grade_report, write_grade_report
     from src.utils.fileio import read_json
